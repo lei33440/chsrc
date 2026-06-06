@@ -788,12 +788,13 @@ write_source() {
 # ============================================================================
 # select_from_list <prompt> <default_idx> <label1> <value1> <label2> <value2> ...
 # Prints the selected VALUE to stdout.
+# All menu display goes to stderr (>/dev/tty if available) so the caller can
+# safely use $(select_from_list ...) to capture only the chosen value.
 # In non-TTY / --yes mode, returns the default's value without prompting.
 select_from_list() {
   local prompt="$1"
   local default_idx="$2"
   shift 2
-  # remaining args are pairs (label, value) — even count required
   if [ $(( $# % 2 )) -ne 0 ]; then
     die "select_from_list: 参数必须成对 (label value)"
   fi
@@ -810,23 +811,39 @@ select_from_list() {
     fi
   fi
 
-  printf "%s%s%s\n" "${C_BOLD}" "${prompt}" "${C_RESET}"
-  local i=1
-  for label in "${labels[@]}"; do
-    if [ "$i" -eq "${default_idx}" ]; then
-      printf "  %s%d)%s %s %s[默认]%s\n" "${C_GREEN}" "${i}" "${C_RESET}" "${label}" "${C_YELLOW}" "${C_RESET}"
-    else
-      printf "  %d) %s\n" "${i}" "${label}"
-    fi
-    i=$((i + 1))
-  done
+  # Pick the best fd for menu display: /dev/tty if open, else stderr.
+  local out=2
+  [ -w /dev/tty ] 2>/dev/null && out=/dev/tty
+
+  {
+    printf "%s%s%s\n" "${C_BOLD}" "${prompt}" "${C_RESET}"
+    local i=1
+    for label in "${labels[@]}"; do
+      if [ "$i" -eq "${default_idx}" ]; then
+        printf "  %s%d)%s %s %s[默认]%s\n" "${C_GREEN}" "${i}" "${C_RESET}" "${label}" "${C_YELLOW}" "${C_RESET}"
+      else
+        printf "  %d) %s\n" "${i}" "${label}"
+      fi
+      i=$((i + 1))
+    done
+    printf "请选择 [${default_idx}]: "
+  } >"$out"
+
+  # Read from /dev/tty if available so the read doesn't consume stdin we're
+  # already using elsewhere (e.g. piped input). Falls back to stdin.
   local choice
-  read -r -p "请选择 [${default_idx}]: " choice
+  if [ -r /dev/tty ] 2>/dev/null; then
+    read -r choice < /dev/tty
+  else
+    read -r choice
+  fi
   choice="${choice:-${default_idx}}"
   if ! [[ "${choice}" =~ ^[0-9]+$ ]] || [ "${choice}" -lt 1 ] || [ "${choice}" -gt "${#values[@]}" ]; then
-    die "无效选择: ${choice}"
+    printf "  %s无效选择: %s%s\n" "${C_RED}" "${choice}" "${C_RESET}" >"$out"
+    return 1
   fi
   echo "${values[$((choice - 1))]}"
+  return 0
 }
 
 # Pick a mirror. Honors TARGET_MIRROR if set, else shows a numbered menu.
@@ -1204,7 +1221,10 @@ cmd_menu() {
   # Refuse menu if system is unrecognized (detect_system already died in that case)
   while true; do
     print_banner
-    local choice
+    local choice=""
+    # select_from_list returns 0 + echoes value on success, 1 on invalid input
+    # (it doesn't die in that case). Capture both stdout and the exit code.
+    local rc=0
     choice="$(select_from_list "$(t menu_title)" 1 \
       "$(t menu_set)"             set \
       "$(t menu_docker_install)"  docker_install \
@@ -1214,16 +1234,24 @@ cmd_menu() {
       "$(t menu_restore)"         restore \
       "$(t menu_status)"          status \
       "$(t menu_quit)"            quit
-    )"
+    )" || rc=$?
+    if [ "${rc}" -ne 0 ] || [ -z "${choice}" ]; then
+      # invalid input → redraw menu without "press enter" pause
+      continue
+    fi
     printf "\n"
     case "${choice}" in
       set)
-        local_mirror="$(pick_mirror)"
-        detect_system
-        log_step "$(t step_backup)"
-        log_step "$(t step_write)"
-        write_source "${local_mirror}"
-        log_ok "$(t step_done)" ;;
+        local_mirror="$(pick_mirror || true)"
+        if [ -z "${local_mirror}" ]; then
+          log_warn "已取消"
+        else
+          detect_system
+          log_step "$(t step_backup)"
+          log_step "$(t step_write)"
+          write_source "${local_mirror}"
+          log_ok "$(t step_done)"
+        fi ;;
       docker_install) docker_install ;;
       docker_mirror)  docker_mirror  ;;
       speedtest)      speedtest      ;;
@@ -1231,6 +1259,7 @@ cmd_menu() {
       restore)        restore_latest ;;
       status)         print_status   ;;
       quit)           printf "%s%s%s\n" "${C_GREEN}" "$(t goodbye)" "${C_RESET}"; return 0 ;;
+      *)              log_warn "未知选项: ${choice}" ;;
     esac
     if [ -t 0 ]; then
       printf "\n"
