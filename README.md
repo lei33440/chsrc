@@ -55,11 +55,48 @@
 # 一行安装到 /usr/local/bin
 curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash
 
-# 或者不安装，直接在线跑
-curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc | sudo bash -s -- status
+# 直接跑，进菜单
+sudo chsrc
 ```
 
-### 使用示例
+### 主菜单交互
+
+直接 `sudo chsrc` 即可进入主菜单，**自动识别系统**后编号选择功能：
+
+```
+=== chsrc v0.1.0 ===
+检测到系统
+  Ubuntu 24.04 LTS / apt / amd64
+
+主菜单
+  1) 切换系统源
+  2) 安装 Docker
+  3) 配置 Docker 镜像加速
+  4) 测速各镜像源
+  5) 备份当前源
+  6) 还原到备份
+  7) 查看系统信息
+  8) 退出
+请选择 [1]:
+```
+
+选 1 后会再弹出镜像源菜单：
+
+```
+请选择镜像源:
+  1) 阿里云
+  2) 清华 TUNA
+  3) 中科大 USTC
+  4) 华为云
+  5) 腾讯云
+  6) 网易
+  7) 上游官方
+请选择 [1]:
+```
+
+### 命令行模式（脚本/高级用户）
+
+```bash
 
 ```bash
 # 查看当前系统识别结果

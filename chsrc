@@ -152,6 +152,29 @@ T_EN[updating_self]="Self-updating..."
 T_ZH[updated]="已是最新"
 T_EN[updated]="Already up to date"
 
+T_ZH[menu_title]="主菜单"
+T_EN[menu_title]="Main menu"
+T_ZH[menu_set]="切换系统源"
+T_EN[menu_set]="Switch system sources"
+T_ZH[menu_docker_install]="安装 Docker"
+T_EN[menu_docker_install]="Install Docker"
+T_ZH[menu_docker_mirror]="配置 Docker 镜像加速"
+T_EN[menu_docker_mirror]="Configure Docker registry mirrors"
+T_ZH[menu_speedtest]="测速各镜像源"
+T_EN[menu_speedtest]="Speed test mirrors"
+T_ZH[menu_backup]="备份当前源"
+T_EN[menu_backup]="Backup current sources"
+T_ZH[menu_restore]="还原到备份"
+T_EN[menu_restore]="Restore from backup"
+T_ZH[menu_status]="查看系统信息"
+T_EN[menu_status]="Show system info"
+T_ZH[menu_quit]="退出"
+T_EN[menu_quit]="Quit"
+T_ZH[press_enter]="按 Enter 返回菜单..."
+T_EN[press_enter]="Press Enter to return to menu..."
+T_ZH[goodbye]="再见"
+T_EN[goodbye]="Bye"
+
 # Translate by key: t <key>
 t() {
   local key="$1"
@@ -761,31 +784,65 @@ write_source() {
 }
 
 # ============================================================================
-# Interactive mirror picker
+# Interactive selector — generic numbered menu
 # ============================================================================
+# select_from_list <prompt> <default_idx> <label1> <value1> <label2> <value2> ...
+# Prints the selected VALUE to stdout.
+# In non-TTY / --yes mode, returns the default's value without prompting.
+select_from_list() {
+  local prompt="$1"
+  local default_idx="$2"
+  shift 2
+  # remaining args are pairs (label, value) — even count required
+  if [ $(( $# % 2 )) -ne 0 ]; then
+    die "select_from_list: 参数必须成对 (label value)"
+  fi
+  local -a labels=()
+  local -a values=()
+  while [ $# -gt 0 ]; do
+    labels+=("$1"); values+=("$2"); shift 2
+  done
+
+  if [ ! -t 0 ] || [ "${ASSUME_YES}" -eq 1 ]; then
+    if [ "${default_idx}" -ge 1 ] && [ "${default_idx}" -le "${#values[@]}" ]; then
+      echo "${values[$((default_idx - 1))]}"
+      return 0
+    fi
+  fi
+
+  printf "%s%s%s\n" "${C_BOLD}" "${prompt}" "${C_RESET}"
+  local i=1
+  for label in "${labels[@]}"; do
+    if [ "$i" -eq "${default_idx}" ]; then
+      printf "  %s%d)%s %s %s[默认]%s\n" "${C_GREEN}" "${i}" "${C_RESET}" "${label}" "${C_YELLOW}" "${C_RESET}"
+    else
+      printf "  %d) %s\n" "${i}" "${label}"
+    fi
+    i=$((i + 1))
+  done
+  local choice
+  read -r -p "请选择 [${default_idx}]: " choice
+  choice="${choice:-${default_idx}}"
+  if ! [[ "${choice}" =~ ^[0-9]+$ ]] || [ "${choice}" -lt 1 ] || [ "${choice}" -gt "${#values[@]}" ]; then
+    die "无效选择: ${choice}"
+  fi
+  echo "${values[$((choice - 1))]}"
+}
+
+# Pick a mirror. Honors TARGET_MIRROR if set, else shows a numbered menu.
 pick_mirror() {
   if [ -n "${TARGET_MIRROR}" ]; then
     echo "${TARGET_MIRROR}"
     return 0
   fi
-  if [ ! -t 0 ] || [ "${ASSUME_YES}" -eq 1 ]; then
-    echo "${MIRROR_TUNA}"
-    return 0
-  fi
-  printf "%s\n" "$(t select_mirror):"
-  local mirrors=(aliyun tuna ustc huawei tencent 163 official)
-  local i=1
-  for m in "${mirrors[@]}"; do
-    printf "  %d) %s\n" "${i}" "$(mirror_label "${m}")"
-    i=$((i + 1))
-  done
-  local choice
-  read -r -p "Number [1]: " choice
-  choice="${choice:-1}"
-  if ! [[ "${choice}" =~ ^[0-9]+$ ]] || [ "${choice}" -lt 1 ] || [ "${choice}" -gt "${#mirrors[@]}" ]; then
-    die "无效选择: ${choice}"
-  fi
-  echo "${mirrors[$((choice - 1))]}"
+  select_from_list "$(t select_mirror)" 1 \
+    "$(t mirror_aliyun)"   aliyun \
+    "$(t mirror_tuna)"     tuna \
+    "$(t mirror_ustc)"     ustc \
+    "$(t mirror_huawei)"   huawei \
+    "$(t mirror_tencent)"  tencent \
+    "$(t mirror_163)"      163 \
+    "$(t mirror_official)" official
 }
 
 # ============================================================================
@@ -967,39 +1024,44 @@ usage() {
   cat <<EOF
 ${C_BOLD}$(t help_title)${C_RESET}  v${CHSRC_VERSION}
 
+${C_BOLD}默认行为${C_RESET}
+  直接执行 chsrc 进入交互式主菜单（自动识别系统、编号选择功能）
+
 ${C_BOLD}$(t help_usage)${C_RESET}
-  chsrc [global opts] <subcommand> [args]
+  chsrc                       # 进入主菜单（默认）
+  chsrc <subcommand> [args]   # 直接执行子命令（适合脚本）
 
 ${C_BOLD}$(t help_subcmds)${C_RESET}
-  status                       显示当前系统识别结果
-  list                         列出支持的发行版与镜像源
-  set [mirror]                 换源（默认交互；可指定 aliyun|tuna|ustc|huawei|tencent|163|official）
-  restore                      从备份还原
-  backup                       手动备份当前源
-  speedtest                    测速各镜像源
-  update                       自更新到最新版本
+  status                      显示当前系统识别结果
+  list                        列出支持的发行版与镜像源
+  set [mirror]                换源（默认交互；可指定 aliyun|tuna|ustc|huawei|tencent|163|official）
+  restore                     从备份还原
+  backup                      手动备份当前源
+  speedtest                   测速各镜像源
+  update                      自更新到最新版本
 
-  docker install               安装 Docker
-  docker mirror                配置 Docker registry-mirrors
-  docker status                查看 Docker 与镜像状态
+  docker install              安装 Docker
+  docker mirror               配置 Docker registry-mirrors
+  docker status               查看 Docker 与镜像状态
 
-  version                      显示版本
-  help                         显示本帮助
+  version                     显示版本
+  help                        显示本帮助
 
 ${C_BOLD}$(t help_opts)${C_RESET}
-  --yes, -y                    $(t opt_yes)
-  --dry-run                    $(t opt_dry)
-  --lang <zh|en>               $(t opt_lang)
-  --verbose                    $(t opt_verbose)
-  -h, --help                   显示帮助
+  --yes, -y                   $(t opt_yes)
+  --dry-run                   $(t opt_dry)
+  --lang <zh|en>              $(t opt_lang)
+  --verbose                   $(t opt_verbose)
+  -h, --help                  显示帮助
 
 ${C_BOLD}示例${C_RESET}
-  curl -fsSL https://raw.githubusercontent.com/${CHSRC_REPO}/main/chsrc | bash -s -- status
-  sudo chsrc set tuna
-  sudo chsrc set aliyun --yes
-  sudo chsrc speedtest
-  sudo chsrc docker install
-  sudo chsrc docker mirror
+  sudo chsrc                       # 进入菜单
+  sudo chsrc set tuna              # 直接换 tuna 源
+  sudo chsrc set aliyun --yes      # 非交互换 aliyun 源
+  sudo chsrc speedtest             # 测速
+  sudo chsrc docker install        # 装 Docker
+  sudo chsrc docker mirror         # 配置 Docker 镜像加速
+  curl -fsSL https://raw.githubusercontent.com/${CHSRC_REPO}/main/chsrc | sudo bash -s -- status
 
 项目主页：https://github.com/${CHSRC_REPO}
 EOF
@@ -1069,7 +1131,7 @@ parse_args() {
     esac
     shift
   done
-  CMD="${CMD:-help}"
+  CMD="${CMD:-menu}"
 }
 
 # ============================================================================
@@ -1116,18 +1178,78 @@ cmd_backup() {
 }
 
 # ============================================================================
+# Main menu — the default UX when chsrc is run with no subcommand
+# ============================================================================
+print_banner() {
+  printf "\n%s%s%s\n" "${C_BOLD}${C_BLUE}" "=== chsrc v${CHSRC_VERSION} ===" "${C_RESET}"
+  if [ -n "${DISTRO_ID:-}" ]; then
+    printf "%s%s%s\n" "${C_BOLD}" "$(t detect_distro)" "${C_RESET}"
+    printf "  %s%s%s / %s / %s\n" \
+      "${DISTRO_NAME}" " ${DISTRO_VERSION}" \
+      "${PKG_MANAGER}" "${ARCH}"
+  fi
+}
+
+cmd_menu() {
+  detect_system
+  # Refuse menu in non-TTY environments unless --yes is set
+  if [ ! -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
+    log_warn "无 TTY 可用，请使用子命令或加 --yes（见 chsrc help）"
+    usage
+    return 1
+  fi
+  # Refuse menu if system is unrecognized (detect_system already died in that case)
+  while true; do
+    print_banner
+    local choice
+    choice="$(select_from_list "$(t menu_title)" 1 \
+      "$(t menu_set)"             set \
+      "$(t menu_docker_install)"  docker_install \
+      "$(t menu_docker_mirror)"   docker_mirror \
+      "$(t menu_speedtest)"       speedtest \
+      "$(t menu_backup)"          backup \
+      "$(t menu_restore)"         restore \
+      "$(t menu_status)"          status \
+      "$(t menu_quit)"            quit
+    )"
+    printf "\n"
+    case "${choice}" in
+      set)
+        local_mirror="$(pick_mirror)"
+        detect_system
+        log_step "$(t step_backup)"
+        log_step "$(t step_write)"
+        write_source "${local_mirror}"
+        log_ok "$(t step_done)" ;;
+      docker_install) docker_install ;;
+      docker_mirror)  docker_mirror  ;;
+      speedtest)      speedtest      ;;
+      backup)         cmd_backup     ;;
+      restore)        restore_latest ;;
+      status)         print_status   ;;
+      quit)           printf "%s%s%s\n" "${C_GREEN}" "$(t goodbye)" "${C_RESET}"; return 0 ;;
+    esac
+    if [ -t 0 ]; then
+      printf "\n"
+      read -r -p "$(t press_enter)"
+    fi
+  done
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 main() {
   parse_args "$@"
-  # Privilege check (status / list / help / version / speedtest are safe to run unprivileged)
+  # Privilege check (status / list / help / version / speedtest / menu are safe)
   case "${CMD}" in
-    status|list|help|version|speedtest) : ;;
+    status|list|help|version|speedtest|menu) : ;;
     *) ensure_root "$@" ;;
   esac
 
   case "${CMD}" in
     help)            usage ;;
+    menu)            cmd_menu ;;
     status)          print_status ;;
     list)            cmd_list ;;
     set)             local_mirror="$(pick_mirror)"
