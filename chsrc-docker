@@ -1,0 +1,524 @@
+#!/usr/bin/env bash
+# chsrc-docker — Standalone Docker installer + registry-mirrors configurator
+# https://github.com/lei33440/chsrc
+# License: MIT
+#
+# Usage: chsrc-docker [global opts] <subcommand>
+#   install [mirror]        Install Docker (mirror: aliyun|tuna|ustc|...|official)
+#   mirror                  Configure /etc/docker/daemon.json registry-mirrors
+#   status                  Show Docker version + configured mirrors
+#   help                    Show help
+#
+# One-shot: curl -fsSL .../chsrc-docker | sudo bash -s -- install aliyun
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+readonly CHSRC_VERSION="0.1.0"
+readonly CHSRC_NAME="chsrc-docker"
+readonly CHSRC_REPO="lei33440/chsrc"
+readonly CHSRC_RAW_URL="https://raw.githubusercontent.com/${CHSRC_REPO}/main/chsrc-docker"
+
+LANG_CODE="zh"
+ASSUME_YES=0
+DRY_RUN=0
+VERBOSE=0
+TARGET_MIRROR=""
+
+DISTRO_ID=""
+DISTRO_LIKE=""
+DISTRO_NAME=""
+DISTRO_VERSION=""
+DISTRO_CODENAME=""
+PKG_MANAGER=""
+ARCH=""
+
+# ============================================================================
+# i18n
+# ============================================================================
+declare -A T_ZH T_EN
+
+T_ZH[help_title]="chsrc-docker — Docker 安装与镜像加速"
+T_EN[help_title]="chsrc-docker — Docker installer & registry mirror config"
+
+T_ZH[help_usage]="用法"
+T_EN[help_usage]="Usage"
+T_ZH[help_subcmds]="子命令"
+T_EN[help_subcmds]="Subcommands"
+T_ZH[help_opts]="全局选项"
+T_EN[help_opts]="Global options"
+
+T_ZH[opt_yes]="非交互模式"
+T_EN[opt_yes]="Non-interactive mode"
+T_ZH[opt_dry]="只打印，不写"
+T_EN[opt_dry]="Print only, do not write"
+T_ZH[opt_lang]="输出语言 zh|en"
+T_EN[opt_lang]="Set output language: zh or en"
+T_ZH[opt_verbose]="详细日志"
+T_EN[opt_verbose]="Verbose debug log"
+
+T_ZH[need_root]="需要 root 权限"
+T_EN[need_root]="Root required"
+T_ZH[err_root]="无法获取 root"
+T_EN[err_root]="Cannot obtain root"
+T_ZH[err_unknown_cmd]="未知子命令"
+T_EN[err_unknown_cmd]="Unknown subcommand"
+T_ZH[err_docker_not_installed]="未检测到 Docker"
+T_EN[err_docker_not_installed]="Docker not detected"
+T_ZH[err_mirror_unknown]="未知镜像源"
+T_EN[err_mirror_unknown]="Unknown mirror"
+T_ZH[err_unsupported_pm]="Docker 自动安装不支持该发行版"
+T_EN[err_unsupported_pm]="Docker auto-install not supported for this distro"
+
+T_ZH[detect_distro]="检测到系统"
+T_EN[detect_distro]="Detected system"
+T_ZH[detect_pm]="包管理器"
+T_EN[detect_pm]="Package manager"
+
+T_ZH[step_installing]="正在安装 Docker..."
+T_EN[step_installing]="Installing Docker..."
+T_ZH[step_config_mirror]="写入 registry-mirrors..."
+T_EN[step_config_mirror]="Writing registry-mirrors..."
+T_ZH[step_restart]="重启 docker 守护进程..."
+T_EN[step_restart]="Restarting docker daemon..."
+T_ZH[step_done]="完成"
+T_EN[step_done]="Done"
+
+T_ZH[docker_installed]="Docker 已安装"
+T_EN[docker_installed]="Docker is already installed"
+T_ZH[docker_mirror_set]="registry-mirrors 已配置"
+T_EN[docker_mirror_set]="registry-mirrors configured"
+T_ZH[docker_no_mirror]="尚未配置 registry-mirrors"
+T_EN[docker_no_mirror]="No registry-mirrors configured"
+
+T_ZH[select_mirror]="请选择 Docker 安装源"
+T_EN[select_mirror]="Select a Docker install mirror"
+
+T_ZH[scene_cn]="国内云"
+T_EN[scene_cn]="China clouds"
+T_ZH[scene_edu]="教育网"
+T_EN[scene_edu]="Edu mirrors"
+T_ZH[scene_abroad]="海外/官方"
+T_EN[scene_abroad]="Abroad/official"
+
+t() {
+  local key="$1"
+  if [ "${LANG_CODE}" = "en" ]; then
+    echo "${T_EN[$key]:-${T_ZH[$key]:-$key}}"
+  else
+    echo "${T_ZH[$key]:-${T_EN[$key]:-$key}}"
+  fi
+}
+
+# ============================================================================
+# UI helpers
+# ============================================================================
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+  C_RED=$'\033[0;31m'
+  C_GREEN=$'\033[0;32m'
+  C_YELLOW=$'\033[0;33m'
+  C_BLUE=$'\033[0;34m'
+  C_BOLD=$'\033[1m'
+  C_RESET=$'\033[0m'
+else
+  C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_BOLD="" C_RESET=""
+fi
+
+log_info()  { printf "%s[i]%s %s\n" "${C_BLUE}" "${C_RESET}" "$*"; }
+log_ok()    { printf "%s[+]%s %s\n" "${C_GREEN}" "${C_RESET}" "$*"; }
+log_warn()  { printf "%s[!]%s %s\n" "${C_YELLOW}" "${C_RESET}" "$*" >&2; }
+log_err()   { printf "%s[x]%s %s\n" "${C_RED}" "${C_RESET}" "$*" >&2; }
+log_step()  { printf "%s[%d]%s %s\n" "${C_BOLD}${C_BLUE}" "${CHSRC_STEP:-0}" "${C_RESET}" "$*"; CHSRC_STEP=$(( ${CHSRC_STEP:-0} + 1 )); }
+die()       { log_err "$*"; exit 1; }
+
+run() {
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s %s\n" "${C_YELLOW}" "${C_RESET}" "$*"
+  else
+    if [ "${VERBOSE}" -eq 1 ]; then
+      printf "%s[run]%s %s\n" "${C_BLUE}" "${C_RESET}" "$*"
+    fi
+    "$@"
+  fi
+}
+
+confirm() {
+  local prompt="${1:-$(t confirm_continue)}"
+  if [ "${ASSUME_YES}" -eq 1 ]; then
+    return 0
+  fi
+  if [ ! -r /dev/tty ] 2>/dev/null; then
+    return 0
+  fi
+  local reply
+  printf "%s%s%s " "${C_YELLOW}" "${prompt}" "${C_RESET}" >/dev/tty
+  read -r reply < /dev/tty
+  case "${reply}" in
+    y|Y|yes|YES|是) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_root() {
+  if [ "$(id -u 2>/dev/null || echo 999)" -ne 0 ]; then
+    log_info "$(t need_root)"
+    exec sudo bash "$0" "$@"
+  fi
+}
+
+# ============================================================================
+# System detection (subset, only what docker_install needs)
+# ============================================================================
+arch_normalize() {
+  case "$(uname -m 2>/dev/null || echo unknown)" in
+    x86_64|amd64)    echo "amd64" ;;
+    aarch64|arm64)   echo "arm64" ;;
+    armv7l|armhf)    echo "armhf" ;;
+    i386|i686)       echo "i386" ;;
+    riscv64)         echo "riscv64" ;;
+    s390x)           echo "s390x" ;;
+    loongarch64)     echo "loongarch64" ;;
+    ppc64le)         echo "ppc64le" ;;
+    *)               echo "$(uname -m)" ;;
+  esac
+}
+
+detect_system() {
+  ARCH="$(arch_normalize)"
+  if [ ! -r /etc/os-release ]; then
+    die "无法识别系统：/etc/os-release 不存在"
+  fi
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  DISTRO_ID="${ID:-unknown}"
+  DISTRO_LIKE="${ID_LIKE:-}"
+  DISTRO_NAME="${NAME:-${DISTRO_ID}}"
+  DISTRO_VERSION="${VERSION_ID:-}"
+  DISTRO_CODENAME="${VERSION_CODENAME:-}"
+  if [ -z "${DISTRO_CODENAME}" ] && [ -n "${DISTRO_VERSION}" ]; then
+    DISTRO_CODENAME="${DISTRO_VERSION%%.*}"
+  fi
+  case "${DISTRO_ID}" in
+    debian|ubuntu|linuxmint|kali|deepin|elementary|zorin|pop|neon)
+      PKG_MANAGER="apt" ;;
+    centos|rhel|rocky|almalinux|opencloudos|openanolis|openEuler|anolis|fedora)
+      if [ "${DISTRO_ID}" = "centos" ] && [ "${DISTRO_VERSION%%.*}" = "7" ]; then
+        PKG_MANAGER="yum"
+      elif [ "${DISTRO_ID}" = "rhel" ] && [ "${DISTRO_VERSION%%.*}" = "7" ]; then
+        PKG_MANAGER="yum"
+      else
+        PKG_MANAGER="dnf"
+      fi
+      ;;
+    arch|manjaro|endeavouros|garuda)
+      PKG_MANAGER="pacman" ;;
+    alpine|postmarketos)
+      PKG_MANAGER="apk" ;;
+    *)
+      case "${DISTRO_LIKE}" in
+        *debian*|*ubuntu*) PKG_MANAGER="apt" ;;
+        *rhel*|*fedora*|*centos*) PKG_MANAGER="dnf" ;;
+        *arch*) PKG_MANAGER="pacman" ;;
+        *) die "$(t err_unsupported_pm): ${DISTRO_ID}" ;;
+      esac ;;
+  esac
+}
+
+# ============================================================================
+# Mirror URL table (apt + yum are enough for docker install; pacman uses repos)
+# ============================================================================
+# Mirrors we expose for the Docker install source. Base URL is the same for
+# apt and yum/dnf. We only need the mirror's web root, then we append
+# /docker-ce/linux/<distro>/ below.
+get_url_aliyun()  { echo "https://mirrors.aliyun.com"; }
+get_url_tuna()    { echo "https://mirrors.tuna.tsinghua.edu.cn"; }
+get_url_ustc()    { echo "https://mirrors.ustc.edu.cn"; }
+get_url_huawei()  { echo "https://mirrors.huaweicloud.com"; }
+get_url_tencent() { echo "https://mirrors.cloud.tencent.com"; }
+get_url_163()     { echo "https://mirrors.163.com"; }
+get_url_pku()     { echo "https://mirrors.pku.edu.cn"; }
+get_url_zju()     { echo "https://mirrors.zju.edu.cn"; }
+get_url_nju()     { echo "https://mirrors.nju.edu.cn"; }
+get_url_sjtu()    { echo "https://mirror.sjtu.edu.cn"; }
+get_url_hust()    { echo "https://mirrors.hust.edu.cn"; }
+get_url_cmecloud(){ echo "https://mirrors.cmecloud.cn"; }
+get_url_ctyun()   { echo "https://mirrors.ctyun.cn"; }
+get_url_volces()  { echo "https://mirrors.volces.com"; }
+get_url_official(){ echo ""; }  # official = download.docker.com
+
+docker_mirror_url() {
+  local m="$1"
+  if [ "${m}" = "official" ]; then
+    echo ""
+    return 0
+  fi
+  if declare -F "get_url_${m}" >/dev/null 2>&1; then
+    "get_url_${m}"
+  else
+    return 1
+  fi
+}
+
+# ============================================================================
+# Docker operations
+# ============================================================================
+docker_installed() {
+  command -v docker >/dev/null 2>&1
+}
+
+docker_status() {
+  if ! docker_installed; then
+    log_warn "$(t err_docker_not_installed)"
+    return 1
+  fi
+  if docker version >/dev/null 2>&1; then
+    local v
+    v="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+    log_ok "$(t docker_installed): ${v}"
+    local mirrors
+    mirrors="$(docker info 2>/dev/null | sed -n '/Registry Mirrors:/,/Live Restore Enabled:/p' | head -n -1 | sed 's/^/  /')"
+    if [ -n "${mirrors}" ]; then
+      printf "%s\n" "${mirrors}"
+    else
+      log_warn "$(t docker_no_mirror)"
+    fi
+  else
+    log_warn "Docker 已安装但守护进程未运行（请 systemctl start docker）"
+  fi
+}
+
+docker_install() {
+  local mirror="${TARGET_MIRROR:-aliyun}"
+  if docker_installed; then
+    log_ok "$(t docker_installed)"
+    return 0
+  fi
+  detect_system
+  log_info "$(t step_installing) (mirror=${mirror})"
+
+  case "${PKG_MANAGER}" in
+    apt)
+      if [ "${mirror}" = "official" ]; then
+        run curl -fsSL https://download.docker.com/linux/${DISTRO_ID}/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+        run tee /etc/apt/sources.list.d/docker.list >/dev/null <<EOF
+deb [arch=${ARCH} signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/${DISTRO_ID} ${DISTRO_CODENAME} stable
+EOF
+      else
+        local base
+        base="$(docker_mirror_url "${mirror}")" || die "$(t err_mirror_unknown): ${mirror}"
+        if [ -z "${base}" ]; then
+          die "$(t err_mirror_unknown): ${mirror}"
+        fi
+        run curl -fsSL "${base}/docker-ce/linux/${DISTRO_ID}/gpg" | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+        run tee /etc/apt/sources.list.d/docker.list >/dev/null <<EOF
+deb [arch=${ARCH} signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] ${base}/docker-ce/linux/${DISTRO_ID} ${DISTRO_CODENAME} stable
+EOF
+      fi
+      run apt-get update
+      run apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+      ;;
+    yum|dnf)
+      local base_docker_repo
+      if [ "${mirror}" = "official" ]; then
+        base_docker_repo="https://download.docker.com/linux/centos/docker-ce.repo"
+      else
+        local base
+        base="$(docker_mirror_url "${mirror}")" || die "$(t err_mirror_unknown): ${mirror}"
+        if [ -z "${base}" ]; then
+          die "$(t err_mirror_unknown): ${mirror}"
+        fi
+        base_docker_repo="${base}/docker-ce/linux/centos/docker-ce.repo"
+      fi
+      if [ "${PKG_MANAGER}" = "yum" ]; then
+        run yum install -y yum-utils
+        run yum-config-manager --add-repo "${base_docker_repo}"
+      else
+        run dnf -y install dnf-plugins-core
+        run dnf config-manager --add-repo "${base_docker_repo}"
+      fi
+      run "${PKG_MANAGER}" install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+      ;;
+    pacman)
+      run pacman -Sy --noconfirm docker docker-compose
+      ;;
+    apk)
+      # Alpine: use community repo; docker package is in main.
+      # We don't change repos here, just install.
+      run apk add --no-cache docker docker-compose
+      rc-service docker start || true
+      ;;
+    *)
+      die "$(t err_unsupported_pm): ${DISTRO_ID} / ${PKG_MANAGER}"
+      ;;
+  esac
+
+  run systemctl enable --now docker || true
+  if docker_installed; then
+    log_ok "$(t docker_installed)"
+  else
+    die "Docker 安装失败"
+  fi
+}
+
+docker_mirror_config() {
+  docker_installed || die "$(t err_docker_not_installed)"
+  local cfg="/etc/docker/daemon.json"
+  local ts bak
+  ts="$(date +%Y%m%d%H%M%S)"
+  if [ -f "${cfg}" ]; then
+    bak="${cfg}.bak.${ts}"
+    run cp -p "${cfg}" "${bak}"
+  fi
+  local mirrors='["https://docker.mirrors.aliyun.com","https://mirror.ccs.tencentyun.com","https://mirrors.huaweicloud.com/repository/docker"]'
+  local content
+  content="$(printf '{\n  "registry-mirrors": %s\n}\n' "${mirrors}")"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将写入 %s：\n" "${C_YELLOW}" "${C_RESET}" "${cfg}"
+    printf "%s\n" "${content}"
+  else
+    run install -d /etc/docker
+    printf "%s" "${content}" > "${cfg}"
+  fi
+  log_step "$(t step_restart)"
+  run systemctl restart docker || true
+  log_ok "$(t docker_mirror_set)"
+  docker_status
+}
+
+# ============================================================================
+# Argument parsing
+# ============================================================================
+usage() {
+  cat <<EOF
+${C_BOLD}$(t help_title)${C_RESET}  v${CHSRC_VERSION}
+
+${C_BOLD}$(t help_usage)${C_RESET}
+  chsrc-docker                              # 交互式选择 (install / mirror / status)
+  chsrc-docker <subcommand> [args]         # 直接执行子命令
+
+${C_BOLD}$(t help_subcmds)${C_RESET}
+  install [mirror]        安装 Docker，可选 mirror: aliyun|tuna|ustc|huawei|tencent|163|official (默认 aliyun)
+  mirror                  写入 /etc/docker/daemon.json registry-mirrors
+  status                  显示 Docker 版本 + 已配置镜像
+  help                    显示本帮助
+  version                 版本
+
+${C_BOLD}$(t help_opts)${C_RESET}
+  --yes, -y               $(t opt_yes)
+  --dry-run               $(t opt_dry)
+  --lang <zh|en>          $(t opt_lang)
+  --verbose               $(t opt_verbose)
+  -h, --help              显示帮助
+
+${C_BOLD}示例${C_RESET}
+  sudo chsrc-docker                           # 交互菜单
+  sudo chsrc-docker install aliyun            # 用阿里源装 Docker
+  sudo chsrc-docker install official          # 用 docker.com 官方源
+  sudo chsrc-docker install aliyun --yes      # 非交互
+  sudo chsrc-docker mirror                    # 配镜像加速
+  sudo chsrc-docker status                    # 看状态
+  curl -fsSL https://raw.githubusercontent.com/${CHSRC_REPO}/main/chsrc-docker | sudo bash -s -- install aliyun
+
+项目主页：https://github.com/${CHSRC_REPO}
+EOF
+}
+
+parse_args() {
+  CMD="menu"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes|-y)         ASSUME_YES=1 ;;
+      --dry-run)        DRY_RUN=1 ;;
+      --verbose)        VERBOSE=1 ;;
+      --lang)           [ $# -ge 2 ] || die "--lang 需要参数"; LANG_CODE="$2"; shift ;;
+      --lang=*)         LANG_CODE="${1#--lang=}" ;;
+      -h|--help|help)   usage; exit 0 ;;
+      version)          echo "${CHSRC_NAME} v${CHSRC_VERSION}"; exit 0 ;;
+      install)          CMD="install"; shift
+                        if [ $# -gt 0 ] && [[ ! "$1" =~ ^- ]]; then
+                          TARGET_MIRROR="$1"; shift
+                        fi
+                        ;;
+      mirror)           CMD="mirror" ;;
+      status)           CMD="status" ;;
+      *)                die "$(t err_unknown_cmd): $1" ;;
+    esac
+    shift
+  done
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+main() {
+  parse_args "$@"
+
+  if [ "${CMD}" != "status" ] && [ "${CMD}" != "menu" ]; then
+    ensure_root "$@"
+  else
+    # status / menu are safe but still want root for docker info
+    if [ "$(id -u 2>/dev/null || echo 999)" -ne 0 ]; then
+      exec sudo bash "$0" "$@"
+    fi
+  fi
+
+  case "${CMD}" in
+    menu)
+      if [ ! -r /dev/tty ] && [ "${ASSUME_YES}" -eq 0 ]; then
+        log_warn "无可用终端，请用子命令（chsrc-docker install aliyun）"
+        usage
+        exit 1
+      fi
+      printf "\n%s%s%s\n" "${C_BOLD}${C_BLUE}" "=== chsrc-docker v${CHSRC_VERSION} ===" "${C_RESET}"
+      if detect_system 2>/dev/null; then
+        printf "  %s%s%s\n" "${C_BOLD}${C_GREEN}" "${DISTRO_NAME} ${DISTRO_VERSION} / ${PKG_MANAGER} / ${ARCH}" "${C_RESET}"
+      fi
+      printf "\n"
+      local choice
+      choice="$(select_subcmd)"
+      case "${choice}" in
+        install) TARGET_MIRROR=""; docker_install ;;
+        mirror)  docker_mirror_config ;;
+        status)  docker_status ;;
+        quit)    exit 0 ;;
+      esac
+      ;;
+    install)
+      docker_install ;;
+    mirror)
+      docker_mirror_config ;;
+    status)
+      docker_status ;;
+  esac
+}
+
+select_subcmd() {
+  local out=2
+  [ -w /dev/tty ] 2>/dev/null && out=/dev/tty
+  {
+    printf "%s请选择操作%s\n" "${C_BOLD}" "${C_RESET}"
+    printf "  %s1)%s 安装 Docker\n" "${C_GREEN}" "${C_RESET}"
+    printf "  2) 配置 Docker 镜像加速\n"
+    printf "  3) 查看 Docker 状态\n"
+    printf "  4) 退出\n"
+    printf "请选择 [1]: "
+  } >"$out"
+  local c
+  if [ -r /dev/tty ] 2>/dev/null; then
+    read -r c < /dev/tty
+  else
+    read -r c
+  fi
+  c="${c:-1}"
+  case "${c}" in
+    1) echo "install" ;;
+    2) echo "mirror" ;;
+    3) echo "status" ;;
+    4) echo "quit" ;;
+    *) echo "install" ;;
+  esac
+}
+
+main "$@"
+

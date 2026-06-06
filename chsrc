@@ -29,6 +29,19 @@ readonly MIRROR_HUAWEI="huawei"
 readonly MIRROR_TENCENT="tencent"
 readonly MIRROR_NETCASE="163"
 readonly MIRROR_OFFICIAL="official"
+readonly MIRROR_PKU="pku"
+readonly MIRROR_ZJU="zju"
+readonly MIRROR_NJU="nju"
+readonly MIRROR_SJTU="sjtu"
+readonly MIRROR_HUST="hust"
+readonly MIRROR_CMECLOUD="cmecloud"
+readonly MIRROR_CTYUN="ctyun"
+readonly MIRROR_VOLCES="volces"
+
+# Scene modes — which mirror set to expose
+readonly SCENE_CN="cn"           # 默认：国内云厂商
+readonly SCENE_EDU="edu"         # 教育网（清华/北大/中科大/...）
+readonly SCENE_ABROAD="abroad"   # 海外 / 上游官方
 
 # ============================================================================
 # Global state (set by parse_args / detect_system)
@@ -37,6 +50,7 @@ LANG_CODE="zh"
 ASSUME_YES=0
 DRY_RUN=0
 TARGET_MIRROR=""
+SCENE="${SCENE_CN}"
 VERBOSE=0
 
 # Detected at runtime
@@ -313,6 +327,40 @@ get_url_apk_tencent() { echo "https://mirrors.cloud.tencent.com/alpine"; }
 get_url_apk_163()     { echo "https://mirrors.163.com/alpine"; }
 get_url_apk_official() { echo "https://dl-cdn.alpinelinux.org"; }
 
+# --- additional mirrors (scene-specific URLs) ---
+# PKU (北大)
+get_url_apt_pku()     { echo "https://mirrors.pku.edu.cn"; }
+get_url_yum_pku()     { echo "https://mirrors.pku.edu.cn"; }
+get_url_pacman_pku()  { echo "https://mirrors.pku.edu.cn/archlinux"; }
+get_url_apk_pku()     { echo "https://mirrors.pku.edu.cn/alpine"; }
+# ZJU (浙大)
+get_url_apt_zju()     { echo "https://mirrors.zju.edu.cn"; }
+get_url_yum_zju()     { echo "https://mirrors.zju.edu.cn"; }
+get_url_pacman_zju()  { echo "https://mirrors.zju.edu.cn/archlinux"; }
+get_url_apk_zju()     { echo "https://mirrors.zju.edu.cn/alpine"; }
+# NJU (南大)
+get_url_apt_nju()     { echo "https://mirrors.nju.edu.cn"; }
+get_url_yum_nju()     { echo "https://mirrors.nju.edu.cn"; }
+get_url_pacman_nju()  { echo "https://mirrors.nju.edu.cn/archlinux"; }
+get_url_apk_nju()     { echo "https://mirrors.nju.edu.cn/alpine"; }
+# SJTU (上交大)
+get_url_apt_sjtu()    { echo "https://mirror.sjtu.edu.cn"; }
+get_url_yum_sjtu()    { echo "https://mirror.sjtu.edu.cn"; }
+get_url_pacman_sjtu() { echo "https://mirror.sjtu.edu.cn/archlinux"; }
+get_url_apk_sjtu()    { echo "https://mirror.sjtu.edu.cn/alpine"; }
+# HUST (华科)
+get_url_apt_hust()    { echo "https://mirrors.hust.edu.cn"; }
+get_url_yum_hust()    { echo "https://mirrors.hust.edu.cn"; }
+get_url_pacman_hust() { echo "https://mirrors.hust.edu.cn/archlinux"; }
+get_url_apk_hust()    { echo "https://mirrors.hust.edu.cn/alpine"; }
+# CMECloud / CTYun / Volces (国内云)
+get_url_apt_cmecloud()  { echo "https://mirrors.cmecloud.cn"; }
+get_url_yum_cmecloud()  { echo "https://mirrors.cmecloud.cn"; }
+get_url_apt_ctyun()     { echo "https://mirrors.ctyun.cn"; }
+get_url_yum_ctyun()     { echo "https://mirrors.ctyun.cn"; }
+get_url_apt_volces()    { echo "https://mirrors.volces.com"; }
+get_url_yum_volces()    { echo "https://mirrors.volces.com"; }
+
 # Generic dispatch: get_url <pm> <mirror>
 get_url() {
   local pm="$1" mirror="$2"
@@ -326,15 +374,51 @@ get_url() {
 # Mirror display name lookup
 mirror_label() {
   case "$1" in
-    aliyun)   t mirror_aliyun ;;
-    tuna)     t mirror_tuna ;;
-    ustc)     t mirror_ustc ;;
-    huawei)   t mirror_huawei ;;
-    tencent)  t mirror_tencent ;;
-    163)      t mirror_163 ;;
-    official) t mirror_official ;;
-    *)        echo "$1" ;;
+    aliyun)    t mirror_aliyun ;;
+    tuna)      t mirror_tuna ;;
+    ustc)      t mirror_ustc ;;
+    huawei)    t mirror_huawei ;;
+    tencent)   t mirror_tencent ;;
+    163)       t mirror_163 ;;
+    official)  t mirror_official ;;
+    pku)       echo "北京大学 (PKU)" ;;
+    zju)       echo "浙江大学 (ZJU)" ;;
+    nju)       echo "南京大学 (NJU)" ;;
+    sjtu)      echo "上海交大 (SJTU)" ;;
+    hust)      echo "华中科大 (HUST)" ;;
+    cmecloud)  echo "移动云 (CMECloud)" ;;
+    ctyun)     echo "天翼云 (CTYun)" ;;
+    volces)    echo "火山引擎 (Volces)" ;;
+    *)         echo "$1" ;;
   esac
+}
+
+# Mirror list per scene (cn / edu / abroad)
+# Usage: list_mirrors_for_scene [pkg_manager]
+# Echoes space-separated mirror ids filtered by what is implemented for the PM.
+list_mirrors_for_scene() {
+  local pm="${1:-}"
+  local -a mirrors_cn=(aliyun huawei tencent 163 cmecloud ctyun volces)
+  local -a mirrors_edu=(tuna ustc pku zju nju sjtu hust)
+  local -a mirrors_abroad=(official)
+  local -a selected=()
+  case "${SCENE}" in
+    edu)     selected=("${mirrors_edu[@]}") ;;
+    abroad)  selected=("${mirrors_abroad[@]}") ;;
+    *)       selected=("${mirrors_cn[@]}") ;;
+  esac
+  # Filter to those with a URL function for the current PM
+  if [ -n "${pm}" ]; then
+    local m out=()
+    for m in "${selected[@]}"; do
+      if declare -F "get_url_${pm}_${m}" >/dev/null 2>&1; then
+        out+=("${m}")
+      fi
+    done
+    printf '%s\n' "${out[@]}"
+  else
+    printf '%s\n' "${selected[@]}"
+  fi
 }
 
 # ============================================================================
@@ -848,20 +932,34 @@ select_from_list() {
   return 0
 }
 
-# Pick a mirror. Honors TARGET_MIRROR if set, else shows a numbered menu.
+# Pick a mirror. Honors TARGET_MIRROR if set, else shows a numbered menu
+# filtered by the current SCENE.
 pick_mirror() {
   if [ -n "${TARGET_MIRROR}" ]; then
     echo "${TARGET_MIRROR}"
     return 0
   fi
-  select_from_list "$(t select_mirror)" 1 \
-    "$(t mirror_aliyun)"   aliyun \
-    "$(t mirror_tuna)"     tuna \
-    "$(t mirror_ustc)"     ustc \
-    "$(t mirror_huawei)"   huawei \
-    "$(t mirror_tencent)"  tencent \
-    "$(t mirror_163)"      163 \
-    "$(t mirror_official)" official
+  # Resolve the current pkg manager so we only show mirrors that have a URL
+  local pm=""
+  if [ -n "${PKG_MANAGER:-}" ]; then
+    pm="${PKG_MANAGER}"
+  elif [ -r /etc/os-release ]; then
+    pm="$(detect_pkg_manager_silent 2>/dev/null || true)"
+  fi
+  local -a ids=()
+  while IFS= read -r m; do
+    [ -n "${m}" ] && ids+=("${m}")
+  done < <(list_mirrors_for_scene "${pm}")
+  if [ "${#ids[@]}" -eq 0 ]; then
+    die "当前场景 (${SCENE}) 没有适用于 ${pm:-该系统} 的镜像"
+  fi
+  # Build select_from_list args dynamically
+  local -a args=()
+  local m
+  for m in "${ids[@]}"; do
+    args+=("$(mirror_label "${m}")" "${m}")
+  done
+  select_from_list "$(t select_mirror) [${SCENE}]" 1 "${args[@]}"
 }
 
 # ============================================================================
@@ -872,7 +970,14 @@ speedtest() {
   pm="$(detect_pkg_manager_silent)"
   log_info "$(t speedtest_running)"
 
-  local mirrors=(aliyun tuna ustc huawei tencent 163)
+  local -a mirrors=()
+  while IFS= read -r m; do
+    [ -n "${m}" ] && mirrors+=("${m}")
+  done < <(list_mirrors_for_scene "${pm}" | grep -v '^official$')
+  if [ "${#mirrors[@]}" -eq 0 ]; then
+    log_warn "当前场景 (${SCENE}) 没有可测速的镜像"
+    return 0
+  fi
   local result_file
   result_file="$(mktemp)"
   trap 'rm -f "${result_file}"' RETURN
@@ -1069,6 +1174,9 @@ ${C_BOLD}$(t help_subcmds)${C_RESET}
 ${C_BOLD}$(t help_opts)${C_RESET}
   --yes, -y                   $(t opt_yes)
   --dry-run                   $(t opt_dry)
+  --abroad                    选用海外/上游官方镜像
+  --edu                       选用教育网镜像（清华/北大/中科大/...）
+  --cn                        选用国内云厂商镜像（默认）
   --lang <zh|en>              $(t opt_lang)
   --verbose                   $(t opt_verbose)
   -h, --help                  显示帮助
@@ -1123,6 +1231,9 @@ parse_args() {
       --yes|-y)         ASSUME_YES=1 ;;
       --dry-run)        DRY_RUN=1 ;;
       --verbose)        VERBOSE=1 ;;
+      --abroad)         SCENE="${SCENE_ABROAD}" ;;
+      --edu)            SCENE="${SCENE_EDU}" ;;
+      --cn)             SCENE="${SCENE_CN}" ;;
       --lang)           [ $# -ge 2 ] || die "--lang 需要参数"; LANG_CODE="$2"; shift ;;
       --lang=*)         LANG_CODE="${1#--lang=}" ;;
       -h|--help|help)   usage; exit 0 ;;
