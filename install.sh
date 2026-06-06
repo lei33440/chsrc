@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# install.sh — Install chsrc to /usr/local/bin
-# Usage: curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash
+# install.sh — Install chsrc to /usr/local/bin and launch it
+# Usage:
+#   curl -fsSL .../install.sh | sudo bash             # install + run menu
+#   curl -fsSL .../install.sh | sudo bash -s -- set tuna   # install + run subcommand
+#   curl -fsSL .../chsrc | sudo bash                   # one-shot, no install
 
 set -e
 
@@ -27,4 +30,8 @@ install -m 755 "${tmp}" "${INSTALL_DIR}/${BIN_NAME}"
 rm -f "${tmp}"
 
 echo "[+] 已安装到 ${INSTALL_DIR}/${BIN_NAME}"
-echo "    运行 \`${BIN_NAME} help\` 查看用法"
+echo
+
+# Auto-launch: hand off to the installed binary with any extra args the user passed.
+# `exec` replaces this shell so the user sees chsrc's output directly, no nested prompt.
+exec "${INSTALL_DIR}/${BIN_NAME}" "$@"

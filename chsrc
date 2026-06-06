@@ -225,11 +225,13 @@ confirm() {
   if [ "${ASSUME_YES}" -eq 1 ]; then
     return 0
   fi
-  if [ ! -t 0 ]; then
+  # Use /dev/tty so confirm() works when the script is piped in (curl | bash)
+  if [ ! -r /dev/tty ] 2>/dev/null; then
     return 0
   fi
   local reply
-  read -r -p "$(printf "%s%s%s " "${C_YELLOW}" "${prompt}" "${C_RESET}")" reply
+  printf "%s%s%s " "${C_YELLOW}" "${prompt}" "${C_RESET}" >/dev/tty
+  read -r reply < /dev/tty
   case "${reply}" in
     y|Y|yes|YES|是) return 0 ;;
     *) return 1 ;;
@@ -1212,9 +1214,11 @@ print_banner() {
 
 cmd_menu() {
   detect_system
-  # Refuse menu in non-TTY environments unless --yes is set
-  if [ ! -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
-    log_warn "无 TTY 可用，请使用子命令或加 --yes（见 chsrc help）"
+  # We need an actual terminal for interactive input. Check /dev/tty (the
+  # controlling terminal) rather than stdin, so the menu still works when
+  # the script itself is piped in via `curl | sudo bash`.
+  if [ ! -r /dev/tty ] && [ "${ASSUME_YES}" -eq 0 ]; then
+    log_warn "无可用终端，请直接用子命令（如 chsrc set tuna --yes）"
     usage
     return 1
   fi
@@ -1261,9 +1265,10 @@ cmd_menu() {
       quit)           printf "%s%s%s\n" "${C_GREEN}" "$(t goodbye)" "${C_RESET}"; return 0 ;;
       *)              log_warn "未知选项: ${choice}" ;;
     esac
-    if [ -t 0 ]; then
-      printf "\n"
-      read -r -p "$(t press_enter)"
+    if [ -r /dev/tty ] 2>/dev/null; then
+      printf "\n" >/dev/tty
+      printf "%s%s%s" "${C_YELLOW}" "$(t press_enter)" "${C_RESET}" >/dev/tty
+      read -r _ < /dev/tty
     fi
   done
 }

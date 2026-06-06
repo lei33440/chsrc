@@ -51,12 +51,28 @@
 
 ### 快速开始
 
-```bash
-# 一行安装到 /usr/local/bin
-curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash
+**一行命令直达菜单**（推荐，无需预装）：
 
-# 直接跑，进菜单
-sudo chsrc
+```bash
+curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc | sudo bash
+```
+
+**或者装到系统再跑**（`install.sh` 装完会自动 exec chsrc）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash
+```
+
+两种方式都直接进入主菜单，不需要再敲 `chsrc`。
+
+**想直接传子命令**（不用进菜单）：
+
+```bash
+# 一行装并换 tuna 源
+curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash -s -- set tuna
+
+# 一行测速
+curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash -s -- speedtest
 ```
 
 ### 主菜单交互
