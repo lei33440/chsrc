@@ -15,7 +15,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-readonly CHSRC_VERSION="0.1.0"
+readonly CHSRC_VERSION="0.1.1"
 readonly CHSRC_NAME="chsrc-docker"
 readonly CHSRC_REPO="lei33440/chsrc"
 readonly CHSRC_RAW_URL="https://raw.githubusercontent.com/${CHSRC_REPO}/main/chsrc-docker"
@@ -91,6 +91,12 @@ T_ZH[docker_mirror_set]="registry-mirrors 已配置"
 T_EN[docker_mirror_set]="registry-mirrors configured"
 T_ZH[docker_no_mirror]="尚未配置 registry-mirrors"
 T_EN[docker_no_mirror]="No registry-mirrors configured"
+T_ZH[confirm_continue]="确认执行？(y/N)"
+T_EN[confirm_continue]="Continue? (y/N)"
+T_ZH[cancelled]="已取消"
+T_EN[cancelled]="Cancelled"
+T_ZH[need_tty_or_yes]="无可用终端且未指定 --yes，拒绝执行（避免误改）"
+T_EN[need_tty_or_yes]="No TTY and --yes not set, refusing (to prevent accidental changes)"
 
 T_ZH[select_mirror]="请选择 Docker 安装源"
 T_EN[select_mirror]="Select a Docker install mirror"
@@ -148,8 +154,12 @@ confirm() {
   if [ "${ASSUME_YES}" -eq 1 ]; then
     return 0
   fi
-  if [ ! -r /dev/tty ] 2>/dev/null; then
+  if [ "${DRY_RUN}" -eq 1 ]; then
     return 0
+  fi
+  if [ ! -r /dev/tty ] 2>/dev/null; then
+    log_warn "$(t need_tty_or_yes)"
+    return 1
   fi
   local reply
   printf "%s%s%s " "${C_YELLOW}" "${prompt}" "${C_RESET}" >/dev/tty
@@ -296,6 +306,9 @@ docker_install() {
   fi
   detect_system
   log_info "$(t step_installing) (mirror=${mirror})"
+  if [ "${ASSUME_YES}" -eq 0 ] && [ "${DRY_RUN}" -eq 0 ]; then
+    confirm "将在 ${DISTRO_ID} ${DISTRO_VERSION} 上安装 Docker（源: ${mirror}），确认继续？(y/N)" || { log_warn "$(t cancelled)"; return 1; }
+  fi
 
   case "${PKG_MANAGER}" in
     apt)
@@ -363,6 +376,9 @@ EOF
 
 docker_mirror_config() {
   docker_installed || die "$(t err_docker_not_installed)"
+  if [ "${ASSUME_YES}" -eq 0 ] && [ "${DRY_RUN}" -eq 0 ]; then
+    confirm "将写入 /etc/docker/daemon.json 的 registry-mirrors，确认继续？(y/N)" || { log_warn "$(t cancelled)"; return 1; }
+  fi
   local cfg="/etc/docker/daemon.json"
   local ts bak
   ts="$(date +%Y%m%d%H%M%S)"

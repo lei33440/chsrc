@@ -13,7 +13,7 @@ set -o pipefail
 # ============================================================================
 # Constants
 # ============================================================================
-readonly CHSRC_VERSION="0.1.0"
+readonly CHSRC_VERSION="0.1.1"
 readonly CHSRC_NAME="chsrc"
 readonly CHSRC_STATE_DIR="/var/lib/chsrc"
 readonly CHSRC_LOCK_FILE="/var/lock/chsrc.lock"
@@ -124,6 +124,17 @@ T_ZH[err_docker_not_installed]="未检测到 Docker，请先 chsrc docker instal
 T_EN[err_docker_not_installed]="Docker not detected, run chsrc docker install first"
 T_ZH[err_no_backup]="没有可还原的备份"
 T_EN[err_no_backup]="No backup available to restore"
+
+T_ZH[need_tty_or_yes]="无可用终端且未指定 --yes，拒绝执行（避免误改）"
+T_EN[need_tty_or_yes]="No TTY and --yes not set, refusing (to prevent accidental changes)"
+T_ZH[plan_title]="即将执行以下操作"
+T_EN[plan_title]="About to perform"
+T_ZH[plan_target]="目标镜像"
+T_EN[plan_target]="Target mirror"
+T_ZH[plan_system]="当前系统"
+T_EN[plan_system]="System"
+T_ZH[plan_files]="将修改文件"
+T_EN[plan_files]="Files to modify"
 
 T_ZH[select_mirror]="请选择镜像源"
 T_EN[select_mirror]="Select a mirror"
@@ -239,9 +250,14 @@ confirm() {
   if [ "${ASSUME_YES}" -eq 1 ]; then
     return 0
   fi
-  # Use /dev/tty so confirm() works when the script is piped in (curl | bash)
-  if [ ! -r /dev/tty ] 2>/dev/null; then
+  if [ "${DRY_RUN}" -eq 1 ]; then
     return 0
+  fi
+  # If we have no TTY (e.g. truly headless pipeline), refuse to silently
+  # mutate system files. The user must opt in with --yes.
+  if [ ! -r /dev/tty ] 2>/dev/null; then
+    log_warn "$(t need_tty_or_yes)"
+    return 1
   fi
   local reply
   printf "%s%s%s " "${C_YELLOW}" "${prompt}" "${C_RESET}" >/dev/tty
@@ -851,6 +867,42 @@ write_portage() {
   run emerge --sync
 }
 
+# Show the user what we're about to do, then ask for confirmation.
+# No-op if --yes or --dry-run.
+confirm_plan() {
+  local mirror="$1"
+  if [ "${ASSUME_YES}" -eq 1 ] || [ "${DRY_RUN}" -eq 1 ]; then
+    return 0
+  fi
+  detect_system
+  printf "\n%s%s%s\n" "${C_BOLD}${C_BLUE}" "$(t plan_title):" "${C_RESET}"
+  printf "  %-12s %s\n" "$(t plan_target)" "$(mirror_label "${mirror}")  (${mirror})"
+  printf "  %-12s %s %s / %s / %s\n" "$(t plan_system)" "${DISTRO_NAME}" "${DISTRO_VERSION}" "${PKG_MANAGER}" "${ARCH}"
+  printf "  %-12s %s\n" "$(t plan_files)" "$(target_files_for_pm)"
+  confirm "$(t confirm_continue)" || { log_warn "$(t cancelled)"; exit 1; }
+}
+
+# Return the file(s) that write_<pm> will touch.
+target_files_for_pm() {
+  case "${PKG_MANAGER}" in
+    apt)    echo "/etc/apt/sources.list" ;;
+    yum)    echo "/etc/yum.repos.d/CentOS-Base.repo" ;;
+    dnf)
+      case "${DISTRO_ID}" in
+        fedora)            echo "/etc/yum.repos.d/fedora.repo" ;;
+        rocky|almalinux)   echo "/etc/yum.repos.d/Rocky-Base.repo" ;;
+        openEuler)         echo "/etc/yum.repos.d/openEuler.repo" ;;
+        anolis|openanolis) echo "/etc/yum.repos.d/AnolisOS.repo" ;;
+        opencloudos)       echo "/etc/yum.repos.d/OpenCloudOS.repo" ;;
+        *)                 echo "/etc/yum.repos.d/${DISTRO_ID}.repo" ;;
+      esac ;;
+    pacman) echo "/etc/pacman.d/mirrorlist" ;;
+    apk)    echo "/etc/apk/repositories" ;;
+    zypper) echo "(managed by zypper, no file)" ;;
+    *)      echo "(unknown)" ;;
+  esac
+}
+
 # Dispatch
 write_source() {
   local mirror="$1"
@@ -1050,6 +1102,9 @@ docker_install() {
   fi
   detect_system
   log_info "$(t docker_installing) (${method})"
+  if [ "${ASSUME_YES}" -eq 0 ] && [ "${DRY_RUN}" -eq 0 ]; then
+    confirm "将在 ${DISTRO_ID} ${DISTRO_VERSION} 上安装 Docker（源: ${method}），确认继续？(y/N)" || { log_warn "$(t cancelled)"; return 1; }
+  fi
 
   case "${PKG_MANAGER}" in
     apt)
@@ -1361,6 +1416,7 @@ cmd_menu() {
         if [ -z "${local_mirror}" ]; then
           log_warn "已取消"
         else
+          confirm_plan "${local_mirror}"
           detect_system
           log_step "$(t step_backup)"
           log_step "$(t step_write)"
@@ -1401,6 +1457,7 @@ main() {
     status)          print_status ;;
     list)            cmd_list ;;
     set)             local_mirror="$(pick_mirror)"
+                     confirm_plan "${local_mirror}"
                      detect_system
                      log_step "$(t step_backup)"
                      log_step "$(t step_write)"

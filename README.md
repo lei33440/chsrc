@@ -87,14 +87,16 @@ curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc | sudo ba
 **一行 Docker 装机**（无菜单）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc-docker | sudo bash -s -- install aliyun
+curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc-docker | sudo bash -s -- install aliyun --yes
 ```
 
 **一行换源**（无菜单，直接换到清华源）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc-lite | sudo bash -s -- tuna
+curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc-lite | sudo bash -s -- tuna --yes
 ```
+
+> `--yes` 跳过确认；想先看 diff 再决定用 `--dry-run`。
 
 **或者装到系统再跑**（`install.sh` 会一次装好三个脚本，并自动 exec chsrc）：
 
@@ -108,11 +110,11 @@ curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | su
 # 装三个脚本 + 执行 chsrc set tuna
 curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash -s -- set tuna
 
-# 装三个脚本 + 执行 chsrc-lite tuna
-curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash -s -- chsrc-lite tuna
+# 装三个脚本 + 执行 chsrc-lite tuna --yes
+curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash -s -- chsrc-lite tuna --yes
 
 # 装三个脚本 + 执行 chsrc-docker install
-curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash -s -- chsrc-docker install aliyun
+curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash -s -- chsrc-docker install aliyun --yes
 
 # 装三个脚本 + 执行 chsrc speedtest
 curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash -s -- speedtest
@@ -252,8 +254,8 @@ chsrc-docker version
 
 | 选项 | 说明 |
 |---|---|
-| `-y`, `--yes` | 非交互模式，跳过所有确认 |
-| `--dry-run` | 只打印 diff，不实际写文件 |
+| `-y`, `--yes` | 非交互模式，跳过所有确认。**脚本化 / 无 TTY 场景必加**，否则拒绝执行 |
+| `--dry-run` | 只打印 diff，不实际写文件（也跳过确认） |
 | `--lang zh\|en` | 强制输出语言 |
 | `--verbose` | 打印详细调试信息 |
 | `--cn` | 选用国内云厂商镜像（默认场景） |
@@ -262,6 +264,24 @@ chsrc-docker version
 | `-h`, `--help` | 显示帮助 |
 
 > `--cn/--edu/--abroad` 主要影响 `chsrc` 主菜单和 `chsrc-lite` 的场景校验；`chsrc-docker install <mirror>` 不受场景影响（你给什么镜像就用什么）。
+
+### 确认机制（避免误改）
+
+所有会改动系统文件的操作（换源、装 Docker、写入 `daemon.json`）在执行前都会先打印计划：
+
+```
+即将执行以下操作:
+  目标镜像     清华 TUNA  (tuna)
+  当前系统     Ubuntu 24.04 LTS / apt / amd64
+  将修改文件   /etc/apt/sources.list
+确认执行？(y/N)
+```
+
+- 终端交互场景：直接回 `y` 继续，回车/其他键取消。
+- 脚本化 / 无 TTY 场景：必须显式带 `--yes`，否则脚本拒绝执行（避免一行 `curl | bash` 误改系统文件）。
+- `--dry-run` 也跳过确认（只看不写）。
+
+### 备份与还原
 
 ### 备份与还原
 
@@ -287,8 +307,11 @@ A: `sudo chsrc speedtest`（主菜单选项 4 也能测速）。
 A:
 
 - 第一次用、不知道选什么 → `chsrc`（带菜单）
-- 写脚本、自动化部署 → `chsrc-lite <mirror>`
+- 写脚本、自动化部署 → `chsrc-lite <mirror>`，记得带 `--yes`
 - 只想装 Docker / 配镜像加速 → `chsrc-docker`
+
+**Q: `curl ... | sudo bash` 直接就改了源，我都没确认？**
+A: 从 v0.1.1 起，所有改动系统文件的操作都会先打印计划并要求 `y` 确认。无 TTY 时必须显式带 `--yes`，否则脚本拒绝执行（防止一行命令误改系统文件）。要只看 diff 不写，加 `--dry-run`。
 
 **Q: chsrc 会删除我的备份吗？**
 A: 不会，备份文件原地保留。
@@ -367,14 +390,19 @@ PR 欢迎。每个脚本的核心位置：
 curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc | sudo bash
 
 # One-line Docker install (Aliyun mirror)
-curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc-docker | sudo bash -s -- install aliyun
+curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc-docker | sudo bash -s -- install aliyun --yes
 
 # One-line source switch (no menu)
-curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc-lite | sudo bash -s -- tuna
+curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/chsrc-lite | sudo bash -s -- tuna --yes
 
 # Install all three scripts to /usr/local/bin
 curl -fsSL https://raw.githubusercontent.com/lei33440/chsrc/main/install.sh | sudo bash
 ```
+
+> Since v0.1.1, all mutating operations require confirmation. In a non-TTY
+> pipeline (the usual `curl | sudo bash` case), you must pass `--yes` —
+> otherwise the script refuses to run. Use `--dry-run` to see the diff
+> without writing.
 
 ### Examples — chsrc
 
@@ -418,8 +446,8 @@ chsrc-docker status                        # Show Docker version + mirrors
 
 | Flag | Description |
 |---|---|
-| `-y`, `--yes` | Non-interactive, accept all defaults |
-| `--dry-run` | Print diff only, never write |
+| `-y`, `--yes` | Non-interactive. **Required** in non-TTY pipelines; otherwise the script refuses to mutate system files |
+| `--dry-run` | Print diff only, never write (also skips confirmation) |
 | `--lang zh\|en` | Force output language |
 | `--verbose` | Verbose debug log |
 | `--cn` / `--edu` / `--abroad` | Restrict mirror list to a scene |
