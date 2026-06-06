@@ -1,0 +1,1150 @@
+#!/usr/bin/env bash
+# chsrc — One-click Linux system source and Docker mirror switcher
+# https://github.com/lei33440/chsrc
+# License: MIT
+#
+# Usage: chsrc [global opts] <subcommand> [args]
+# Run `chsrc help` for the full command reference.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# ============================================================================
+# Constants
+# ============================================================================
+readonly CHSRC_VERSION="0.1.0"
+readonly CHSRC_NAME="chsrc"
+readonly CHSRC_STATE_DIR="/var/lib/chsrc"
+readonly CHSRC_LOCK_FILE="/var/lock/chsrc.lock"
+readonly CHSRC_MANIFEST="${CHSRC_STATE_DIR}/manifest"
+readonly CHSRC_REPO="lei33440/chsrc"
+readonly CHSRC_RAW_URL="https://raw.githubusercontent.com/${CHSRC_REPO}/main/chsrc"
+
+# Mirror identifiers (kept short and stable; referenced throughout)
+readonly MIRROR_ALIYUN="aliyun"
+readonly MIRROR_TUNA="tuna"
+readonly MIRROR_USTC="ustc"
+readonly MIRROR_HUAWEI="huawei"
+readonly MIRROR_TENCENT="tencent"
+readonly MIRROR_NETCASE="163"
+readonly MIRROR_OFFICIAL="official"
+
+# ============================================================================
+# Global state (set by parse_args / detect_system)
+# ============================================================================
+LANG_CODE="zh"
+ASSUME_YES=0
+DRY_RUN=0
+TARGET_MIRROR=""
+VERBOSE=0
+
+# Detected at runtime
+DISTRO_ID=""
+DISTRO_LIKE=""
+DISTRO_NAME=""
+DISTRO_VERSION=""
+DISTRO_CODENAME=""
+PKG_MANAGER=""
+ARCH=""
+
+# ============================================================================
+# i18n — translation table
+# ============================================================================
+declare -A T_ZH T_EN
+
+T_ZH[help_title]="chsrc — Linux 一键换源 + Docker 安装换源"
+T_EN[help_title]="chsrc — One-click Linux system source & Docker mirror switcher"
+
+T_ZH[help_usage]="用法"
+T_EN[help_usage]="Usage"
+
+T_ZH[help_subcmds]="子命令"
+T_EN[help_subcmds]="Subcommands"
+
+T_ZH[help_opts]="全局选项"
+T_EN[help_opts]="Global options"
+
+T_ZH[opt_yes]="非交互模式，全部按默认确认"
+T_EN[opt_yes]="Non-interactive mode, accept defaults"
+T_ZH[opt_dry]="只打印将要做的改动，不实际写入"
+T_EN[opt_dry]="Print changes only, do not write"
+T_ZH[opt_lang]="指定输出语言 zh 或 en"
+T_EN[opt_lang]="Set output language: zh or en"
+T_ZH[opt_verbose]="打印详细调试信息"
+T_EN[opt_verbose]="Print verbose debug info"
+
+T_ZH[need_root]="需要 root 权限，正在尝试用 sudo 重启..."
+T_EN[need_root]="Root required, re-launching with sudo..."
+T_ZH[err_root]="无法获取 root 权限，请用 root 或 sudo 执行"
+T_EN[err_root]="Cannot obtain root, please run as root or with sudo"
+
+T_ZH[detect_distro]="检测到系统"
+T_EN[detect_distro]="Detected system"
+T_ZH[detect_pm]="包管理器"
+T_EN[detect_pm]="Package manager"
+T_ZH[detect_arch]="架构"
+T_EN[detect_arch]="Architecture"
+T_ZH[detect_unknown]="无法识别该系统"
+T_EN[detect_unknown]="Unable to identify this system"
+
+T_ZH[step_backup]="备份现有源..."
+T_EN[step_backup]="Backing up existing sources..."
+T_ZH[step_write]="写入新源..."
+T_EN[step_write]="Writing new sources..."
+T_ZH[step_refresh]="刷新本地缓存..."
+T_EN[step_refresh]="Refreshing local cache..."
+T_ZH[step_done]="完成"
+T_EN[step_done]="Done"
+
+T_ZH[confirm_continue]="确认继续？(y/N)"
+T_EN[confirm_continue]="Continue? (y/N)"
+
+T_ZH[err_unsupported]="暂不支持该发行版的换源"
+T_EN[err_unsupported]="Source switch not supported for this distro"
+T_ZH[err_mirror_unknown]="未知镜像源"
+T_EN[err_mirror_unknown]="Unknown mirror"
+T_ZH[err_need_target]="需要指定目标镜像"
+T_EN[err_need_target]="Target mirror is required"
+T_ZH[err_docker_not_installed]="未检测到 Docker，请先 chsrc docker install"
+T_EN[err_docker_not_installed]="Docker not detected, run chsrc docker install first"
+T_ZH[err_no_backup]="没有可还原的备份"
+T_EN[err_no_backup]="No backup available to restore"
+
+T_ZH[select_mirror]="请选择镜像源"
+T_EN[select_mirror]="Select a mirror"
+T_ZH[select_install_method]="请选择安装方式"
+T_EN[select_install_method]="Select install method"
+
+T_ZH[mirror_aliyun]="阿里云"
+T_EN[mirror_aliyun]="Aliyun"
+T_ZH[mirror_tuna]="清华 TUNA"
+T_EN[mirror_tuna]="Tsinghua TUNA"
+T_ZH[mirror_ustc]="中科大 USTC"
+T_EN[mirror_ustc]="USTC"
+T_ZH[mirror_huawei]="华为云"
+T_EN[mirror_huawei]="Huawei Cloud"
+T_ZH[mirror_tencent]="腾讯云"
+T_EN[mirror_tencent]="Tencent Cloud"
+T_ZH[mirror_163]="网易"
+T_EN[mirror_163]="NetEase"
+T_ZH[mirror_official]="上游官方"
+T_EN[mirror_official]="Upstream official"
+
+T_ZH[speedtest_running]="正在测速..."
+T_EN[speedtest_running]="Testing mirror speeds..."
+T_ZH[speedtest_result]="测速结果（延迟越低越好）"
+T_EN[speedtest_result]="Speed test (lower is better)"
+
+T_ZH[docker_installed]="Docker 已安装"
+T_EN[docker_installed]="Docker is already installed"
+T_ZH[docker_installing]="正在安装 Docker..."
+T_EN[docker_installing]="Installing Docker..."
+T_ZH[docker_mirror_set]="Docker 镜像加速已配置"
+T_EN[docker_mirror_set]="Docker registry mirrors configured"
+T_ZH[docker_no_mirror]="尚未配置 registry-mirrors"
+T_EN[docker_no_mirror]="No registry-mirrors configured"
+
+T_ZH[restored]="已还原到备份"
+T_EN[restored]="Restored from backup"
+T_ZH[updating_self]="正在自更新..."
+T_EN[updating_self]="Self-updating..."
+T_ZH[updated]="已是最新"
+T_EN[updated]="Already up to date"
+
+# Translate by key: t <key>
+t() {
+  local key="$1"
+  if [ "${LANG_CODE}" = "en" ]; then
+    echo "${T_EN[$key]:-${T_ZH[$key]:-$key}}"
+  else
+    echo "${T_ZH[$key]:-${T_EN[$key]:-$key}}"
+  fi
+}
+
+# ============================================================================
+# UI helpers
+# ============================================================================
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+  C_RED=$'\033[0;31m'
+  C_GREEN=$'\033[0;32m'
+  C_YELLOW=$'\033[0;33m'
+  C_BLUE=$'\033[0;34m'
+  C_BOLD=$'\033[1m'
+  C_RESET=$'\033[0m'
+else
+  C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_BOLD="" C_RESET=""
+fi
+
+log_info()  { printf "%s[i]%s %s\n" "${C_BLUE}" "${C_RESET}" "$*"; }
+log_ok()    { printf "%s[+]%s %s\n" "${C_GREEN}" "${C_RESET}" "$*"; }
+log_warn()  { printf "%s[!]%s %s\n" "${C_YELLOW}" "${C_RESET}" "$*" >&2; }
+log_err()   { printf "%s[x]%s %s\n" "${C_RED}" "${C_RESET}" "$*" >&2; }
+log_step()  { printf "%s[%d]%s %s\n" "${C_BOLD}${C_BLUE}" "${CHSRC_STEP:-0}" "${C_RESET}" "$*"; CHSRC_STEP=$(( ${CHSRC_STEP:-0} + 1 )); }
+
+die()       { log_err "$*"; exit 1; }
+
+run() {
+  # run <cmd...> — honor DRY_RUN
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s %s\n" "${C_YELLOW}" "${C_RESET}" "$*"
+  else
+    if [ "${VERBOSE}" -eq 1 ]; then
+      printf "%s[run]%s %s\n" "${C_BLUE}" "${C_RESET}" "$*"
+    fi
+    "$@"
+  fi
+}
+
+confirm() {
+  # confirm "prompt" — returns 0 on yes, 1 on no
+  local prompt="${1:-$(t confirm_continue)}"
+  if [ "${ASSUME_YES}" -eq 1 ]; then
+    return 0
+  fi
+  if [ ! -t 0 ]; then
+    return 0
+  fi
+  local reply
+  read -r -p "$(printf "%s%s%s " "${C_YELLOW}" "${prompt}" "${C_RESET}")" reply
+  case "${reply}" in
+    y|Y|yes|YES|是) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ============================================================================
+# Privilege escalation
+# ============================================================================
+ensure_root() {
+  if [ "$(id -u 2>/dev/null || echo 999)" -ne 0 ]; then
+    log_info "$(t need_root)"
+    exec sudo bash "$0" "$@"
+  fi
+}
+
+# ============================================================================
+# Mirror URL tables
+# Each mirror is a function get_url_<pm>_<mirror>() that echoes the base URL
+# ============================================================================
+arch_normalize() {
+  case "$(uname -m 2>/dev/null || echo unknown)" in
+    x86_64|amd64)    echo "amd64" ;;
+    aarch64|arm64)   echo "arm64" ;;
+    armv7l|armhf)    echo "armhf" ;;
+    i386|i686)       echo "i386" ;;
+    riscv64)         echo "riscv64" ;;
+    s390x)           echo "s390x" ;;
+    loongarch64)     echo "loongarch64" ;;
+    ppc64le)         echo "ppc64le" ;;
+    *)               echo "$(uname -m)" ;;
+  esac
+}
+
+# --- apt (Debian/Ubuntu) ---
+get_url_apt_aliyun()  { echo "https://mirrors.aliyun.com"; }
+get_url_apt_tuna()    { echo "https://mirrors.tuna.tsinghua.edu.cn"; }
+get_url_apt_ustc()    { echo "https://mirrors.ustc.edu.cn"; }
+get_url_apt_huawei()  { echo "https://mirrors.huaweicloud.com"; }
+get_url_apt_tencent() { echo "https://mirrors.cloud.tencent.com"; }
+get_url_apt_163()     { echo "https://mirrors.163.com"; }
+get_url_apt_official() { echo ""; }  # empty => do not rewrite
+
+# --- yum/dnf (RHEL family) ---
+get_url_yum_aliyun()  { echo "https://mirrors.aliyun.com"; }
+get_url_yum_tuna()    { echo "https://mirrors.tuna.tsinghua.edu.cn"; }
+get_url_yum_ustc()    { echo "https://mirrors.ustc.edu.cn"; }
+get_url_yum_huawei()  { echo "https://mirrors.huaweicloud.com"; }
+get_url_yum_tencent() { echo "https://mirrors.cloud.tencent.com"; }
+get_url_yum_163()     { echo "https://mirrors.163.com"; }
+get_url_yum_official() { echo ""; }
+
+get_url_dnf() { get_url_yum_"$1"; }
+
+# --- pacman (Arch) ---
+get_url_pacman_aliyun()  { echo "https://mirrors.aliyun.com/archlinux"; }
+get_url_pacman_tuna()    { echo "https://mirrors.tuna.tsinghua.edu.cn/archlinux"; }
+get_url_pacman_ustc()    { echo "https://mirrors.ustc.edu.cn/archlinux"; }
+get_url_pacman_huawei()  { echo "https://mirrors.huaweicloud.com/archlinux"; }
+get_url_pacman_tencent() { echo "https://mirrors.cloud.tencent.com/archlinux"; }
+get_url_pacman_163()     { echo "https://mirrors.163.com/archlinux"; }
+get_url_pacman_official() { echo "https://archlinux.org"; }
+
+# --- zypper (openSUSE) ---
+get_url_zypper_aliyun()  { echo "https://mirrors.aliyun.com/opensuse"; }
+get_url_zypper_tuna()    { echo "https://mirrors.tuna.tsinghua.edu.cn/opensuse"; }
+get_url_zypper_ustc()    { echo "https://mirrors.ustc.edu.cn/opensuse"; }
+get_url_zypper_huawei()  { echo "https://mirrors.huaweicloud.com/opensuse"; }
+get_url_zypper_tencent() { echo "https://mirrors.cloud.tencent.com/opensuse"; }
+get_url_zypper_163()     { echo "https://mirrors.163.com/opensuse"; }
+get_url_zypper_official() { echo "https://download.opensuse.org"; }
+
+# --- apk (Alpine) ---
+get_url_apk_aliyun()  { echo "https://mirrors.aliyun.com/alpine"; }
+get_url_apk_tuna()    { echo "https://mirrors.tuna.tsinghua.edu.cn/alpine"; }
+get_url_apk_ustc()    { echo "https://mirrors.ustc.edu.cn/alpine"; }
+get_url_apk_huawei()  { echo "https://mirrors.huaweicloud.com/alpine"; }
+get_url_apk_tencent() { echo "https://mirrors.cloud.tencent.com/alpine"; }
+get_url_apk_163()     { echo "https://mirrors.163.com/alpine"; }
+get_url_apk_official() { echo "https://dl-cdn.alpinelinux.org"; }
+
+# Generic dispatch: get_url <pm> <mirror>
+get_url() {
+  local pm="$1" mirror="$2"
+  if declare -F "get_url_${pm}_${mirror}" >/dev/null 2>&1; then
+    "get_url_${pm}_${mirror}"
+  else
+    return 1
+  fi
+}
+
+# Mirror display name lookup
+mirror_label() {
+  case "$1" in
+    aliyun)   t mirror_aliyun ;;
+    tuna)     t mirror_tuna ;;
+    ustc)     t mirror_ustc ;;
+    huawei)   t mirror_huawei ;;
+    tencent)  t mirror_tencent ;;
+    163)      t mirror_163 ;;
+    official) t mirror_official ;;
+    *)        echo "$1" ;;
+  esac
+}
+
+# ============================================================================
+# System detection
+# ============================================================================
+detect_system() {
+  ARCH="$(arch_normalize)"
+
+  if [ ! -r /etc/os-release ]; then
+    die "$(t detect_unknown) — /etc/os-release 不存在"
+  fi
+
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  DISTRO_ID="${ID:-unknown}"
+  DISTRO_LIKE="${ID_LIKE:-}"
+  DISTRO_NAME="${NAME:-${DISTRO_ID}}"
+  DISTRO_VERSION="${VERSION_ID:-}"
+  DISTRO_CODENAME="${VERSION_CODENAME:-}"
+
+  # Fallback codename from version for RHEL family
+  if [ -z "${DISTRO_CODENAME}" ] && [ -n "${DISTRO_VERSION}" ]; then
+    DISTRO_CODENAME="${DISTRO_VERSION%%.*}"
+  fi
+
+  case "${DISTRO_ID}" in
+    debian|ubuntu|linuxmint|kali|deepin|elementary|zorin|pop|neon)
+      PKG_MANAGER="apt" ;;
+    centos|rhel|rocky|almalinux|opencloudos|openanolis|openEuler|anolis|fedora)
+      # CentOS 7 / RHEL 7 still use yum; everything newer uses dnf
+      if [ "${DISTRO_ID}" = "centos" ] && [ "${DISTRO_VERSION%%.*}" = "7" ]; then
+        PKG_MANAGER="yum"
+      elif [ "${DISTRO_ID}" = "rhel" ] && [ "${DISTRO_VERSION%%.*}" = "7" ]; then
+        PKG_MANAGER="yum"
+      else
+        PKG_MANAGER="dnf"
+      fi
+      # Anolis / openEuler / OpenCloudOS use dnf in all versions
+      ;;
+    arch|manjaro|endeavouros|garuda)
+      PKG_MANAGER="pacman" ;;
+    opensuse*|sles|suse)
+      PKG_MANAGER="zypper" ;;
+    alpine|postmarketos)
+      PKG_MANAGER="apk" ;;
+    void)
+      PKG_MANAGER="xbps" ;;
+    solus)
+      PKG_MANAGER="eopkg" ;;
+    gentoo)
+      PKG_MANAGER="portage" ;;
+    *)
+      # Try ID_LIKE fallback
+      case "${DISTRO_LIKE}" in
+        *debian*|*ubuntu*) PKG_MANAGER="apt" ;;
+        *rhel*|*fedora*|*centos*) PKG_MANAGER="dnf" ;;
+        *arch*) PKG_MANAGER="pacman" ;;
+        *suse*) PKG_MANAGER="zypper" ;;
+        *) die "$(t detect_unknown): ${DISTRO_ID}" ;;
+      esac
+      ;;
+  esac
+}
+
+print_status() {
+  detect_system
+  printf "%s%s%s\n" "${C_BOLD}" "$(t detect_distro)" "${C_RESET}"
+  printf "  %-12s %s\n" "ID"        "${DISTRO_ID}"
+  printf "  %-12s %s\n" "Name"      "${DISTRO_NAME}"
+  printf "  %-12s %s\n" "Version"   "${DISTRO_VERSION}"
+  printf "  %-12s %s\n" "Codename"  "${DISTRO_CODENAME}"
+  printf "  %-12s %s\n" "$(t detect_pm)"   "${PKG_MANAGER}"
+  printf "  %-12s %s\n" "$(t detect_arch)" "${ARCH}"
+}
+
+# ============================================================================
+# Backup / restore
+# ============================================================================
+backup_file() {
+  # backup_file <path> — keeps a timestamped copy, records in manifest
+  local target="$1"
+  [ -e "${target}" ] || return 0
+  local ts bak
+  ts="$(date +%Y%m%d%H%M%S)"
+  bak="${target}.bak.${ts}"
+  run cp -p "${target}" "${bak}"
+  if [ "${DRY_RUN}" -eq 0 ]; then
+    mkdir -p "${CHSRC_STATE_DIR}"
+    printf "%s\t%s\n" "${bak}" "${target}" >> "${CHSRC_MANIFEST}"
+  fi
+}
+
+restore_latest() {
+  [ -f "${CHSRC_MANIFEST}" ] || die "$(t err_no_backup)"
+  # Read manifest in reverse to find most recent entry for each target
+  local target bak
+  declare -A seen
+  while IFS=$'\t' read -r bak target; do
+    [ -n "${target}" ] || continue
+    if [ -z "${seen[${target}]:-}" ] && [ -f "${bak}" ]; then
+      run cp -p "${bak}" "${target}"
+      log_ok "$(t restored): ${target} ← ${bak}"
+      seen["${target}"]=1
+    fi
+  done < <(tac "${CHSRC_MANIFEST}")
+}
+
+# ============================================================================
+# Source writers — one per package manager
+# Each writes the standard sources file(s) for the detected distro + mirror.
+# They all call backup_file() first, then write the new content via run().
+# ============================================================================
+
+# --- apt ---
+write_apt() {
+  local mirror="$1" base
+  base="$(get_url apt "${mirror}")" || die "$(t err_mirror_unknown): ${mirror}"
+  local code="${DISTRO_CODENAME:-}"
+  [ -n "${code}" ] || die "无法取得发行版代号 (VERSION_CODENAME 为空)"
+
+  if [ "${mirror}" = "official" ] || [ -z "${base}" ]; then
+    log_info "已选择 official 源，不做修改"
+    return 0
+  fi
+
+  local file="/etc/apt/sources.list"
+  backup_file "${file}"
+
+  local content
+  content="$(cat <<EOF
+# Generated by chsrc on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Mirror: $(mirror_label "${mirror}") (${base})
+deb ${base}/${DISTRO_ID} ${code} main contrib non-free non-free-firmware
+deb ${base}/${DISTRO_ID} ${code}-updates main contrib non-free non-free-firmware
+deb ${base}/${DISTRO_ID} ${code}-backports main contrib non-free non-free-firmware
+deb ${base}/${DISTRO_ID}-security ${code}-security main contrib non-free non-free-firmware
+EOF
+)"
+  # For Ubuntu, the layout is slightly different
+  if [ "${DISTRO_ID}" = "ubuntu" ]; then
+    content="$(cat <<EOF
+# Generated by chsrc on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Mirror: $(mirror_label "${mirror}") (${base})
+deb ${base}/ubuntu ${code} main restricted universe multiverse
+deb ${base}/ubuntu ${code}-updates main restricted universe multiverse
+deb ${base}/ubuntu ${code}-backports main restricted universe multiverse
+deb ${base}/ubuntu ${code}-security main restricted universe multiverse
+EOF
+)"
+  fi
+
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将写入 %s：\n" "${C_YELLOW}" "${C_RESET}" "${file}"
+    printf "%s\n" "${content}"
+  else
+    printf "%s\n" "${content}" > "${file}"
+  fi
+
+  log_step "$(t step_refresh)"
+  run apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=10
+}
+
+# --- yum (CentOS 7 / RHEL 7) ---
+write_yum() {
+  local mirror="$1" base
+  base="$(get_url yum "${mirror}")" || die "$(t err_mirror_unknown): ${mirror}"
+  if [ "${mirror}" = "official" ] || [ -z "${base}" ]; then
+    log_info "已选择 official 源，不做修改"
+    return 0
+  fi
+  local ver="${DISTRO_VERSION%%.*}"
+  local repo_dir="/etc/yum.repos.d"
+  backup_file "${repo_dir}/CentOS-Base.repo"
+
+  local file="${repo_dir}/CentOS-Base.repo"
+  local content
+  content="$(cat <<EOF
+# Generated by chsrc on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Mirror: $(mirror_label "${mirror}") (${base})
+[base]
+name=CentOS-\$releasever - Base - $(mirror_label "${mirror}")
+baseurl=${base}/centos/\$releasever/os/\$basearch/
+gpgcheck=1
+gpgkey=${base}/centos/RPM-GPG-KEY-CentOS-${ver}
+
+[updates]
+name=CentOS-\$releasever - Updates - $(mirror_label "${mirror}")
+baseurl=${base}/centos/\$releasever/updates/\$basearch/
+gpgcheck=1
+gpgkey=${base}/centos/RPM-GPG-KEY-CentOS-${ver}
+
+[extras]
+name=CentOS-\$releasever - Extras - $(mirror_label "${mirror}")
+baseurl=${base}/centos/\$releasever/extras/\$basearch/
+gpgcheck=1
+gpgkey=${base}/centos/RPM-GPG-KEY-CentOS-${ver}
+EOF
+)"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将写入 %s\n" "${C_YELLOW}" "${C_RESET}" "${file}"
+    printf "%s\n" "${content}"
+  else
+    printf "%s\n" "${content}" > "${file}"
+  fi
+  log_step "$(t step_refresh)"
+  run yum clean all
+  run yum makecache
+}
+
+# --- dnf (Fedora / RHEL 8+ / Rocky / Alma / openEuler etc) ---
+write_dnf() {
+  local mirror="$1" base
+  base="$(get_url yum "${mirror}")" || die "$(t err_mirror_unknown): ${mirror}"
+  if [ "${mirror}" = "official" ] || [ -z "${base}" ]; then
+    log_info "已选择 official 源，不做修改"
+    return 0
+  fi
+
+  local repo_dir="/etc/yum.repos.d"
+  local repo_file=""
+  case "${DISTRO_ID}" in
+    fedora)         repo_file="${repo_dir}/fedora.repo" ;;
+    rocky|almalinux) repo_file="${repo_dir}/Rocky-Base.repo" ;;
+    openEuler)      repo_file="${repo_dir}/openEuler.repo" ;;
+    anolis|openanolis) repo_file="${repo_dir}/AnolisOS.repo" ;;
+    opencloudos)    repo_file="${repo_dir}/OpenCloudOS.repo" ;;
+    *)              repo_file="${repo_dir}/${DISTRO_ID}.repo" ;;
+  esac
+  backup_file "${repo_file}"
+
+  # Fedora-specific layout
+  if [ "${DISTRO_ID}" = "fedora" ]; then
+    local ver="${DISTRO_VERSION}"
+    local content
+    content="$(cat <<EOF
+# Generated by chsrc on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Mirror: $(mirror_label "${mirror}") (${base})
+[fedora]
+name=Fedora ${ver} - $(mirror_label "${mirror}")
+baseurl=${base}/fedora/releases/${ver}/Everything/\$basearch/os/
+gpgcheck=1
+gpgkey=${base}/fedora/releases/${ver}/Everything/\$basearch/os/RPM-GPG-KEY-fedora-${ver}-${ARCH}
+
+[updates]
+name=Fedora ${ver} - Updates - $(mirror_label "${mirror}")
+baseurl=${base}/fedora/updates/${ver}/Everything/\$basearch/
+gpgcheck=1
+gpgkey=${base}/fedora/releases/${ver}/Everything/\$basearch/os/RPM-GPG-KEY-fedora-${ver}-${ARCH}
+EOF
+)"
+    if [ "${DRY_RUN}" -eq 1 ]; then
+      printf "%s[dry-run]%s 将写入 %s\n" "${C_YELLOW}" "${C_RESET}" "${repo_file}"
+      printf "%s\n" "${content}"
+    else
+      printf "%s\n" "${content}" > "${repo_file}"
+    fi
+    log_step "$(t step_refresh)"
+    run dnf clean all
+    run dnf makecache
+    return 0
+  fi
+
+  # Generic RHEL-family layout
+  local ver="${DISTRO_VERSION%%.*}"
+  local content
+  content="$(cat <<EOF
+# Generated by chsrc on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Mirror: $(mirror_label "${mirror}") (${base})
+[baseos]
+name=${DISTRO_NAME} BaseOS - $(mirror_label "${mirror}")
+baseurl=${base}/${DISTRO_ID}/os/\$basearch/
+gpgcheck=1
+enabled=1
+
+[appstream]
+name=${DISTRO_NAME} AppStream - $(mirror_label "${mirror}")
+baseurl=${base}/${DISTRO_ID}/appstream/\$basearch/
+gpgcheck=1
+enabled=1
+
+[extras]
+name=${DISTRO_NAME} Extras - $(mirror_label "${mirror}")
+baseurl=${base}/${DISTRO_ID}/extras/\$basearch/
+gpgcheck=1
+enabled=1
+EOF
+)"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将写入 %s\n" "${C_YELLOW}" "${C_RESET}" "${repo_file}"
+    printf "%s\n" "${content}"
+  else
+    printf "%s\n" "${content}" > "${repo_file}"
+  fi
+  log_step "$(t step_refresh)"
+  run dnf clean all
+  run dnf makecache
+}
+
+# --- pacman (Arch) ---
+write_pacman() {
+  local mirror="$1" base
+  base="$(get_url pacman "${mirror}")" || die "$(t err_mirror_unknown): ${mirror}"
+  local file="/etc/pacman.d/mirrorlist"
+  backup_file "${file}"
+
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将置顶 %s：%s\n" "${C_YELLOW}" "${C_RESET}" "${file}" "${base}/\$repo/os/\$arch"
+  else
+    {
+      printf "## Generated by chsrc on %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf "## Mirror: %s\n" "$(mirror_label "${mirror}")"
+      printf "Server = %s/\$repo/os/\$arch\n" "${base}"
+      printf "\n"
+      [ -f "${file}" ] && tail -n +1 "${file}.bak."* 2>/dev/null | grep -v '^##' | grep -v '^Server' | grep -v '^$' || true
+    } > "${file}"
+  fi
+  log_step "$(t step_refresh)"
+  run pacman -Sy
+}
+
+# --- zypper (openSUSE) ---
+write_zypper() {
+  local mirror="$1" base
+  base="$(get_url zypper "${mirror}")" || die "$(t err_mirror_unknown): ${mirror}"
+  if [ "${mirror}" = "official" ] || [ -z "${base}" ]; then
+    log_info "已选择 official 源，不做修改"
+    return 0
+  fi
+
+  local ver="${DISTRO_VERSION}"
+  [ -n "${ver}" ] || ver="${DISTRO_CODENAME:-tumbleweed}"
+  # zypper mr + ar (managed by zypper)
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将添加 repo %s\n" "${C_YELLOW}" "${C_RESET}" "${base}/distribution/leap/${ver}/repo/oss"
+  else
+    run zypper mr -da || true
+    run zypper ar -fcg "${base}/distribution/leap/${ver}/repo/oss" "chsrc-oss" || true
+    run zypper ar -fcg "${base}/distribution/leap/${ver}/repo/non-oss" "chsrc-non-oss" || true
+    run zypper ar -fcg "${base}/update/leap/${ver}/oss" "chsrc-update-oss" || true
+    run zypper ar -fcg "${base}/update/leap/${ver}/non-oss" "chsrc-update-non-oss" || true
+  fi
+  log_step "$(t step_refresh)"
+  run zypper ref
+}
+
+# --- apk (Alpine) ---
+write_apk() {
+  local mirror="$1" base
+  base="$(get_url apk "${mirror}")" || die "$(t err_mirror_unknown): ${mirror}"
+  local file="/etc/apk/repositories"
+  backup_file "${file}"
+
+  local ver="${DISTRO_VERSION%%.*}"
+  local content
+  content="$(cat <<EOF
+# Generated by chsrc on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Mirror: $(mirror_label "${mirror}") (${base})
+${base}/v${ver}/main
+${base}/v${ver}/community
+EOF
+)"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将写入 %s\n" "${C_YELLOW}" "${C_RESET}" "${file}"
+    printf "%s\n" "${content}"
+  else
+    printf "%s\n" "${content}" > "${file}"
+  fi
+  log_step "$(t step_refresh)"
+  run apk update
+}
+
+# --- xbps (Void) ---
+write_xbps() {
+  local mirror="$1" base
+  base="https://mirrors.aliyun.com/voidlinux"  # xbps mirror support varies
+  local file="/etc/xbps.d/00-chsrc.conf"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将写入 %s\n" "${C_YELLOW}" "${C_RESET}" "${file}"
+  else
+    run install -d /etc/xbps.d
+    run sh -c "echo 'repository=${base}/current/${ARCH}/nonfree' > ${file}"
+    run sh -c "echo 'repository=${base}/current/${ARCH}/multilib' >> ${file}"
+    run sh -c "echo 'repository=${base}/current/${ARCH}/multilib/nonfree' >> ${file}"
+  fi
+  log_step "$(t step_refresh)"
+  run xbps-install -S
+}
+
+# --- eopkg (Solus) ---
+write_eopkg() {
+  local mirror="$1" base
+  base="$(get_url yum "${mirror}")"  # Solus uses Aliyun's mirror at mirrors.aliyun.com/solinux
+  if [ "${mirror}" = "aliyun" ]; then
+    base="https://mirrors.aliyun.com/solinux"
+  fi
+  local file="/etc/eopkg/sources.conf"
+  backup_file "${file}"
+
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将替换 %s\n" "${C_YELLOW}" "${C_RESET}" "${file}"
+  else
+    run sed -i "s|^https://mirror\.solus\.com|${base}|g" "${file}"
+  fi
+  log_step "$(t step_refresh)"
+  run eopkg update-repo
+}
+
+# --- portage (Gentoo) ---
+write_portage() {
+  local mirror="$1" base
+  case "${mirror}" in
+    aliyun)   base="https://mirrors.aliyun.com/gentoo" ;;
+    tuna)     base="https://mirrors.tuna.tsinghua.edu.cn/gentoo" ;;
+    ustc)     base="https://mirrors.ustc.edu.cn/gentoo" ;;
+    huawei)   base="https://mirrors.huaweicloud.com/gentoo" ;;
+    tencent)  base="https://mirrors.cloud.tencent.com/gentoo" ;;
+    163)      base="https://mirrors.163.com/gentoo" ;;
+    official) base="https://distfiles.gentoo.org" ;;
+  esac
+
+  local file="/etc/portage/repos.conf/gentoo.conf"
+  backup_file "${file}"
+
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将替换 sync-uri 为 %s\n" "${C_YELLOW}" "${C_RESET}" "${base}/snapshots"
+  else
+    run sed -i "s|^sync-uri = .*|sync-uri = ${base}/snapshots|" "${file}"
+  fi
+  log_step "$(t step_refresh)"
+  run emerge --sync
+}
+
+# Dispatch
+write_source() {
+  local mirror="$1"
+  detect_system
+  case "${PKG_MANAGER}" in
+    apt)     write_apt "${mirror}" ;;
+    yum)     write_yum "${mirror}" ;;
+    dnf)     write_dnf "${mirror}" ;;
+    pacman)  write_pacman "${mirror}" ;;
+    zypper)  write_zypper "${mirror}" ;;
+    apk)     write_apk "${mirror}" ;;
+    xbps)    write_xbps "${mirror}" ;;
+    eopkg)   write_eopkg "${mirror}" ;;
+    portage) write_portage "${mirror}" ;;
+    *)       die "$(t err_unsupported): ${PKG_MANAGER}" ;;
+  esac
+}
+
+# ============================================================================
+# Interactive mirror picker
+# ============================================================================
+pick_mirror() {
+  if [ -n "${TARGET_MIRROR}" ]; then
+    echo "${TARGET_MIRROR}"
+    return 0
+  fi
+  if [ ! -t 0 ] || [ "${ASSUME_YES}" -eq 1 ]; then
+    echo "${MIRROR_TUNA}"
+    return 0
+  fi
+  printf "%s\n" "$(t select_mirror):"
+  local mirrors=(aliyun tuna ustc huawei tencent 163 official)
+  local i=1
+  for m in "${mirrors[@]}"; do
+    printf "  %d) %s\n" "${i}" "$(mirror_label "${m}")"
+    i=$((i + 1))
+  done
+  local choice
+  read -r -p "Number [1]: " choice
+  choice="${choice:-1}"
+  if ! [[ "${choice}" =~ ^[0-9]+$ ]] || [ "${choice}" -lt 1 ] || [ "${choice}" -gt "${#mirrors[@]}" ]; then
+    die "无效选择: ${choice}"
+  fi
+  echo "${mirrors[$((choice - 1))]}"
+}
+
+# ============================================================================
+# Speed test
+# ============================================================================
+speedtest() {
+  local pm
+  pm="$(detect_pkg_manager_silent)"
+  log_info "$(t speedtest_running)"
+
+  local mirrors=(aliyun tuna ustc huawei tencent 163)
+  local result_file
+  result_file="$(mktemp)"
+  trap 'rm -f "${result_file}"' RETURN
+
+  for m in "${mirrors[@]}"; do
+    local url
+    if ! url="$(get_url "${pm}" "${m}" 2>/dev/null)"; then
+      continue
+    fi
+    if [ -z "${url}" ]; then
+      continue
+    fi
+    # Probe a small known-stable file
+    local probe="${url}/"
+    case "${pm}" in
+      apt)     probe="${url}/${DISTRO_ID}/dists/${DISTRO_CODENAME}/Release" ;;
+      yum|dnf) probe="${url}/centos/" ;;
+      pacman)  probe="${url}/os/" ;;
+      zypper)  probe="${url}/" ;;
+      apk)     probe="${url}/v${DISTRO_VERSION%%.*}/main/" ;;
+    esac
+    (
+      t=$(curl -o /dev/null -s -m 5 -w "%{time_total}" "${probe}" 2>/dev/null || echo "999")
+      printf "%s\t%s\t%s\n" "${t}" "${m}" "${url}" >> "${result_file}"
+    ) &
+  done
+  wait
+
+  printf "\n%s\n" "$(t speedtest_result):"
+  printf "%-8s  %-20s  %s\n" "Latency" "Mirror" "URL"
+  sort -n "${result_file}" | while IFS=$'\t' read -r t m url; do
+    printf "%-8s  %-20s  %s\n" "${t}s" "$(mirror_label "${m}")" "${url}"
+  done
+}
+
+detect_pkg_manager_silent() {
+  if [ -z "${PKG_MANAGER}" ]; then
+    detect_system
+  fi
+  echo "${PKG_MANAGER}"
+}
+
+# ============================================================================
+# Docker module
+# ============================================================================
+docker_installed() {
+  command -v docker >/dev/null 2>&1
+}
+
+docker_status() {
+  if ! docker_installed; then
+    log_warn "Docker 未安装"
+    return 1
+  fi
+  if docker version >/dev/null 2>&1; then
+    local v
+    v="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+    log_ok "$(t docker_installed): ${v}"
+    docker info 2>/dev/null | sed -n '/Registry Mirrors:/,/Live Restore Enabled:/p' | head -n -1 | sed 's/^/  /' || true
+  else
+    log_warn "Docker 已安装但守护进程未运行"
+  fi
+}
+
+docker_install() {
+  local method="${TARGET_MIRROR:-${MIRROR_ALIYUN}}"
+  if docker_installed; then
+    log_ok "$(t docker_installed)"
+    return 0
+  fi
+  detect_system
+  log_info "$(t docker_installing) (${method})"
+
+  case "${PKG_MANAGER}" in
+    apt)
+      if [ "${method}" = "official" ]; then
+        run curl -fsSL https://download.docker.com/linux/${DISTRO_ID}/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+        echo "deb [arch=${ARCH} signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/${DISTRO_ID} ${DISTRO_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+      else
+        local base
+        base="$(get_url apt "${method}")"
+        run curl -fsSL "${base}/docker-ce/linux/${DISTRO_ID}/gpg" | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+        echo "deb [arch=${ARCH} signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] ${base}/docker-ce/linux/${DISTRO_ID} ${DISTRO_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+      fi
+      run apt-get update
+      run apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+      ;;
+    yum|dnf)
+      if [ "${PKG_MANAGER}" = "yum" ]; then
+        run yum install -y yum-utils
+        run yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+      else
+        run dnf -y install dnf-plugins-core
+        if [ "${method}" = "official" ]; then
+          run dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        else
+          local base
+          base="$(get_url dnf "${method}")"
+          run dnf config-manager --add-repo "${base}/docker-ce/linux/centos/docker-ce.repo"
+        fi
+      fi
+      run "${PKG_MANAGER}" install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+      ;;
+    pacman)
+      run pacman -Sy --noconfirm docker docker-compose
+      ;;
+    *)
+      die "Docker 自动安装不支持该发行版（${DISTRO_ID}），请参考 https://docs.docker.com/engine/install/ 手动安装"
+      ;;
+  esac
+
+  run systemctl enable --now docker
+  if docker_installed; then
+    log_ok "$(t docker_installed)"
+  else
+    die "Docker 安装失败"
+  fi
+}
+
+docker_mirror() {
+  docker_installed || die "$(t err_docker_not_installed)"
+
+  local cfg="/etc/docker/daemon.json"
+  backup_file "${cfg}"
+
+  local mirrors='["https://docker.mirrors.aliyun.com","https://mirror.ccs.tencentyun.com","https://mirrors.huaweicloud.com/repository/docker"]'
+  local content
+  content="$(printf '{\n  "registry-mirrors": %s\n}\n' "${mirrors}")"
+
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf "%s[dry-run]%s 将写入 %s：\n" "${C_YELLOW}" "${C_RESET}" "${cfg}"
+    printf "%s\n" "${content}"
+  else
+    run install -d /etc/docker
+    printf "%s" "${content}" > "${cfg}"
+  fi
+  run systemctl restart docker
+  log_ok "$(t docker_mirror_set)"
+  docker_status
+}
+
+docker_self_update() {
+  log_info "$(t updating_self)"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log_warn "dry-run 模式不执行实际更新"
+    return 0
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  if curl -fsSL -o "${tmp}" "${CHSRC_RAW_URL}"; then
+    if grep -q "CHSRC_VERSION=\"${CHSRC_VERSION}\"" "${tmp}"; then
+      log_ok "$(t updated): ${CHSRC_VERSION}"
+    else
+      run install -m 755 "${tmp}" "/usr/local/bin/${CHSRC_NAME}"
+      log_ok "已更新到新版本"
+    fi
+  else
+    log_err "下载失败，请检查网络"
+    return 1
+  fi
+  rm -f "${tmp}"
+}
+
+# ============================================================================
+# Argument parsing
+# ============================================================================
+usage() {
+  cat <<EOF
+${C_BOLD}$(t help_title)${C_RESET}  v${CHSRC_VERSION}
+
+${C_BOLD}$(t help_usage)${C_RESET}
+  chsrc [global opts] <subcommand> [args]
+
+${C_BOLD}$(t help_subcmds)${C_RESET}
+  status                       显示当前系统识别结果
+  list                         列出支持的发行版与镜像源
+  set [mirror]                 换源（默认交互；可指定 aliyun|tuna|ustc|huawei|tencent|163|official）
+  restore                      从备份还原
+  backup                       手动备份当前源
+  speedtest                    测速各镜像源
+  update                       自更新到最新版本
+
+  docker install               安装 Docker
+  docker mirror                配置 Docker registry-mirrors
+  docker status                查看 Docker 与镜像状态
+
+  version                      显示版本
+  help                         显示本帮助
+
+${C_BOLD}$(t help_opts)${C_RESET}
+  --yes, -y                    $(t opt_yes)
+  --dry-run                    $(t opt_dry)
+  --lang <zh|en>               $(t opt_lang)
+  --verbose                    $(t opt_verbose)
+  -h, --help                   显示帮助
+
+${C_BOLD}示例${C_RESET}
+  curl -fsSL https://raw.githubusercontent.com/${CHSRC_REPO}/main/chsrc | bash -s -- status
+  sudo chsrc set tuna
+  sudo chsrc set aliyun --yes
+  sudo chsrc speedtest
+  sudo chsrc docker install
+  sudo chsrc docker mirror
+
+项目主页：https://github.com/${CHSRC_REPO}
+EOF
+}
+
+parse_args() {
+  # First pass: find any mirror positional that follows `set`, since flags may
+  # appear in any order (e.g. `chsrc set --yes tuna`).
+  local -a _args=()
+  while [ $# -gt 0 ]; do
+    _args+=("$1")
+    shift
+  done
+  set -- "${_args[@]}"
+  unset _args
+
+  # Find a non-flag arg that comes after `set` and isn't part of another subcommand
+  local i=1
+  while [ $i -le $# ]; do
+    local cur="${!i}"
+    if [ "$cur" = "set" ]; then
+      local j=$((i + 1))
+      while [ $j -le $# ]; do
+        local nxt="${!j}"
+        if [ "$nxt" = "--" ]; then break; fi
+        if [[ "$nxt" =~ ^- ]]; then
+          j=$((j + 1))
+          continue
+        fi
+        TARGET_MIRROR="$nxt"
+        break
+      done
+    fi
+    i=$((i + 1))
+  done
+
+  # Second pass: dispatch
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes|-y)         ASSUME_YES=1 ;;
+      --dry-run)        DRY_RUN=1 ;;
+      --verbose)        VERBOSE=1 ;;
+      --lang)           [ $# -ge 2 ] || die "--lang 需要参数"; LANG_CODE="$2"; shift ;;
+      --lang=*)         LANG_CODE="${1#--lang=}" ;;
+      -h|--help|help)   usage; exit 0 ;;
+      version)          echo "${CHSRC_NAME} v${CHSRC_VERSION}"; exit 0 ;;
+      status)           CMD="status" ;;
+      list)             CMD="list" ;;
+      set)              CMD="set" ;;
+      restore)          CMD="restore" ;;
+      backup)           CMD="backup" ;;
+      speedtest)        CMD="speedtest" ;;
+      update)           CMD="update" ;;
+      docker)
+                        [ $# -ge 2 ] || die "docker 需要子命令 (install|mirror|status)"
+                        case "$2" in
+                          install) CMD="docker_install" ;;
+                          mirror)  CMD="docker_mirror" ;;
+                          status)  CMD="docker_status" ;;
+                          *)       die "未知 docker 子命令: $2" ;;
+                        esac
+                        shift 2
+                        ;;
+      --)               shift; break ;;
+      -*)               die "未知选项: $1" ;;
+      *)                : ;;  # already captured by first pass
+    esac
+    shift
+  done
+  CMD="${CMD:-help}"
+}
+
+# ============================================================================
+# Subcommand list
+# ============================================================================
+cmd_list() {
+  cat <<EOF
+${C_BOLD}支持的发行版${C_RESET}
+  apt    : Debian, Ubuntu, Linux Mint, Kali, Deepin, Elementary, Zorin
+  yum    : CentOS 7, RHEL 7
+  dnf    : Fedora, RHEL 8+, CentOS Stream, Rocky, AlmaLinux, openEuler, Anolis
+  pacman : Arch, Manjaro, EndeavourOS, Garuda
+  zypper : openSUSE Leap / Tumbleweed, SLE
+  apk    : Alpine, postmarketOS
+  xbps   : Void
+  eopkg  : Solus
+  portage: Gentoo
+
+${C_BOLD}支持的镜像源${C_RESET}
+  aliyun   - $(t mirror_aliyun)
+  tuna     - $(t mirror_tuna)
+  ustc     - $(t mirror_ustc)
+  huawei   - $(t mirror_huawei)
+  tencent  - $(t mirror_tencent)
+  163      - $(t mirror_163)
+  official - $(t mirror_official)
+EOF
+}
+
+cmd_backup() {
+  detect_system
+  case "${PKG_MANAGER}" in
+    apt)     backup_file /etc/apt/sources.list ;;
+    yum)     backup_file /etc/yum.repos.d/CentOS-Base.repo ;;
+    dnf)     for f in /etc/yum.repos.d/*.repo; do backup_file "${f}"; done ;;
+    pacman)  backup_file /etc/pacman.d/mirrorlist ;;
+    zypper)  : ;;  # zypper repos are managed by zypper itself
+    apk)     backup_file /etc/apk/repositories ;;
+    xbps)    backup_file /etc/xbps.d/00-chsrc.conf || true ;;
+    eopkg)   backup_file /etc/eopkg/sources.conf ;;
+    portage) backup_file /etc/portage/repos.conf/gentoo.conf || true ;;
+  esac
+  log_ok "备份完成"
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+main() {
+  parse_args "$@"
+  # Privilege check (status / list / help / version / speedtest are safe to run unprivileged)
+  case "${CMD}" in
+    status|list|help|version|speedtest) : ;;
+    *) ensure_root "$@" ;;
+  esac
+
+  case "${CMD}" in
+    help)            usage ;;
+    status)          print_status ;;
+    list)            cmd_list ;;
+    set)             local_mirror="$(pick_mirror)"
+                     detect_system
+                     log_step "$(t step_backup)"
+                     log_step "$(t step_write)"
+                     write_source "${local_mirror}"
+                     log_ok "$(t step_done)" ;;
+    restore)         restore_latest ;;
+    backup)          cmd_backup ;;
+    speedtest)       speedtest ;;
+    update)          docker_self_update ;;
+    docker_install)  docker_install ;;
+    docker_mirror)   docker_mirror ;;
+    docker_status)   docker_status ;;
+    *)               die "未知子命令: ${CMD}" ;;
+  esac
+}
+
+main "$@"

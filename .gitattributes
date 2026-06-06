@@ -1,0 +1,9 @@
+# Force LF line endings for shell scripts and yml
+*.sh        eol=lf
+*.bash      eol=lf
+chsrc       eol=lf
+*.yml       eol=lf
+*.yaml      eol=lf
+*.md        eol=lf
+LICENSE     eol=lf
+.gitignore  eol=lf
