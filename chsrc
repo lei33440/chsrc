@@ -1183,10 +1183,13 @@ cmd_backup() {
 print_banner() {
   printf "\n%s%s%s\n" "${C_BOLD}${C_BLUE}" "=== chsrc v${CHSRC_VERSION} ===" "${C_RESET}"
   if [ -n "${DISTRO_ID:-}" ]; then
-    printf "%s%s%s\n" "${C_BOLD}" "$(t detect_distro)" "${C_RESET}"
-    printf "  %s%s%s / %s / %s\n" \
-      "${DISTRO_NAME}" " ${DISTRO_VERSION}" \
-      "${PKG_MANAGER}" "${ARCH}"
+    # Build a compact one-liner: Name Version (codename) / pkg_mgr / arch
+    local left="${DISTRO_NAME:-${DISTRO_ID}}"
+    [ -n "${DISTRO_VERSION:-}" ] && left="${left} ${DISTRO_VERSION}"
+    [ -n "${DISTRO_CODENAME:-}" ] && left="${left} (${DISTRO_CODENAME})"
+    printf "  %s%-32s%s %s/%s/%s\n" \
+      "${C_BOLD}${C_GREEN}" "${left}" "${C_RESET}" \
+      "${PKG_MANAGER}" "${ARCH}" "${DISTRO_ID}"
   fi
 }
 
